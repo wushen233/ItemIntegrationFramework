@@ -1,0 +1,11 @@
+* text=auto
+*.cpp text eol=lf
+*.h text eol=lf
+*.json text eol=lf
+*.lua text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf
+*.as text eol=lf whitespace=-blank-at-eol,-blank-at-eof
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf

@@ -1,0 +1,24 @@
+﻿#pragma once
+#include "pch.h"
+
+namespace IIF::Hooks
+{
+	struct InternalCard {
+		std::string text; std::string label; bool highlightLabel; std::string value;
+		bool showDifference; bool invertDiffColor;
+		bool hasDifference; float difference;
+		bool hasRawValue; double rawValue; std::string suffix;
+		int priority; int displayType; bool hasBackground; std::uint32_t backgroundColor;
+		std::vector<std::string> anchorTargets; std::vector<std::string> anchorModes; std::string sortValueFrom;
+		float fillPct{ -1.0f }; float shieldPct{ 0.0f }; std::uint32_t fillColor{ 0 };
+		float thresholdPct{ -1.0f }; float thresholdPct2{ -1.0f }; std::uint32_t thresholdColor{ 0 };
+		bool showBar; bool showValue; std::string valueText; std::string valueAlign; std::uint32_t valueColor;
+		bool valueStandard; bool valueBad; bool valueGood;
+		std::string icon1; bool icon1IsText; std::string val1; bool val1Bad; bool val1Good; bool val1Standard; std::string align1;
+		std::string icon2; bool icon2IsText; std::string val2; bool val2Bad; bool val2Good; bool val2Standard; std::string align2;
+	};
+
+	extern std::vector<InternalCard> g_pendingCards;
+
+	void Install();
+}
