@@ -71,6 +71,8 @@ See `docs/examples` and the configuration files for supported card schemas.
 
 ## License
 
-Original IIF source is released under the MIT License. Vendored Xbyak remains
-under its BSD-3-Clause license. Third-party compatibility patch bases remain
-subject to their respective terms. See `THIRD_PARTY_NOTICES.md`.
+Original IIF source is released under the MIT License. Built binaries also
+contain `commonlib-shared` code distributed under GPL-3.0 with the CommonLib
+Modding Exception. Vendored Xbyak remains under its BSD-3-Clause license.
+Third-party compatibility patch bases remain subject to their respective
+terms. See `THIRD_PARTY_NOTICES.md` and `licenses/commonlib-shared`.
