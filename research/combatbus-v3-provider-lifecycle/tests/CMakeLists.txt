@@ -44,3 +44,7 @@ add_test(NAME provider_lifecycle_no_dispatch_static
 	COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 		"${CMAKE_CURRENT_SOURCE_DIR}/VerifyLifecycleNoDispatch.ps1"
 		-RepositoryRoot "${REPOSITORY_ROOT}" -ProjectRoot "${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME f4se_version_template_static
+	COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+		"${CMAKE_CURRENT_SOURCE_DIR}/VerifyF4SEVersionTemplates.ps1"
+		-RepositoryRoot "${REPOSITORY_ROOT}")

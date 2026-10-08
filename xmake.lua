@@ -36,7 +36,8 @@ target("ItemIntegrationFramework")
             name = "ItemIntegrationFramework",
             author = "h_wushen",
             description = "Shared item card injection and hook framework for Fallout 4",
-            version = "1.0.5"
+            version = "1.0.5",
+            plugin_template = path.join(os.scriptdir(), "res/commonlibf4-plugin.cpp.in")
         })
 
         add_packages("simpleini", "nlohmann_json", "tinyxml2", "imgui", "microsoft-detours", "minhook")

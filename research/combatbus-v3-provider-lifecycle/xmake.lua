@@ -19,7 +19,8 @@ target("IIFCombatBusProviderLifecycleSmoke")
         name = "IIFCombatBusProviderLifecycleSmoke",
         author = "ItemIntegrationFramework research",
         description = "Temporary no-hook CombatBus V3 Provider lifecycle probe",
-        version = "1.0.0"
+        version = "1.0.0",
+        plugin_template = path.join(os.scriptdir(), "res/commonlibf4-plugin.cpp.in")
     })
     add_files("src/ProviderLifecycleSmoke.cpp", "src/ProviderLifecycleScenario.cpp")
     add_includedirs("src", "../../src/CombatBusV3")
