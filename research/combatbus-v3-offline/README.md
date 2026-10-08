@@ -1,4 +1,4 @@
-# IIF CombatBus Phase 1O Offline Prototype
+# IIF CombatBus Phase 1Q–1R Offline Prototype
 
 This directory contains an isolated ABI/Dispatcher candidate and executable fixtures. It is not connected to IIF production code, does not contain a Fallout 4 hook, and does not claim to mirror native `HitData` memory.
 
@@ -24,12 +24,12 @@ Other profiles require a separately verified adapter mask. A profile name alone 
 - Outgoing is a pure calculation contract and may opt into Prediction. Incoming represents a candidate Health value after resistance and before difficulty scaling; it is not identified as native EntryPoint `0x24`.
 - A callback can register another provider because no Registry write mutex is held during callback execution. The new provider appears on the next dispatch.
 - Same-stage recursive dispatch is rejected. Cross-stage dispatch is allowed, but a cycle returning to an active stage is rejected.
-- Callback return failure, exception in this same-binary fixture, malformed output, NaN/Infinity, negative or greater-than-one multiplier, and out-of-range result all roll back to the original snapshot.
+- Callback return failure, exception in the same-binary C++ fixture, malformed output, NaN/Infinity, negative or greater-than-one multiplier, and out-of-range result all roll back to the original snapshot. Exceptions are not a cross-DLL contract: Provider implementations must catch their own exceptions and return a C status without unwinding across the module boundary.
 - Registration copies provider IDs. The callback and provider context remain borrowed; provider code/context must remain alive through unregistration and `Wait*Quiescent`. Unregistration prevents future callbacks; the wait is an external unload barrier. Calling that wait from the Provider's own callback returns `WouldDeadlock`.
 - `Removed` means excluded from new snapshots and disabled; it does not mean callbacks have finished. `WaitQuiescent` must return `Quiescent` before callback code/context can be unloaded. An Unregister preparation/allocation failure returns `AllocationFailure` before disabling; the Provider remains active and the handle remains registered. A failed/unfinished wait never authorizes unload.
 - Dispatch `Applied` means at least one eligible Provider returned a valid `Apply`, even if its multiplier is 1. `NoChange` means eligible Provider(s) ran but none applied a result. `NoProviders` means no Provider matched the stage/evaluation. `NoDamage` means valid, modifiable Health/Physical inputs were zero and no callbacks ran. Error results preserve the numeric input snapshot, but cannot undo external Provider side effects.
-- The owner must stop new dispatch/register/unregister calls and join all dispatcher callers before destroying the `Dispatcher`; per-provider quiescence does not protect the dispatcher object's own lifetime.
-- Callback pointers and InterfaceV3 function pointers use Win64 `__cdecl` (the unified Windows x64 calling convention). A callback must not throw across a DLL/C ABI boundary. The in-process fixture catch is defensive and is not a cross-runtime exception guarantee.
+- `Dispatcher::Shutdown` atomically closes the API call gate, rejects later calls, waits for entered calls, and releases active and retired snapshots without allocating. The owner must first stop new external ingress; after Shutdown it must join every caller before destroying the object. Shutdown does not make concurrent object destruction or a stale call through freed object memory safe.
+- Callback pointers use Win64 `__cdecl` (the unified Windows x64 calling convention). A callback must not throw across a DLL/C ABI boundary. The in-process fixture catch is defensive and is not a cross-runtime exception guarantee.
 - `UnregisterStatus::AllocationFailure` preserves the old published snapshot and enabled Entry. Snapshot allocation and retirement-map insertion happen before disable; after disable, only non-allocating publication remains. Wait errors retain the retirement handle and return `WaitFailure`. Test-only failure injection exercises snapshot-preparation and retirement-insertion failures without exhausting system memory.
 - Handles are allocated by a Dispatcher-wide monotonic atomic counter and never reused; exhaustion returns `RegistrationStatus::HandleExhausted` rather than wrapping to zero or colliding.
 - `atomic<shared_ptr>` is used for snapshot publication, with no claim that it is hardware lock-free.
@@ -41,8 +41,39 @@ Errors return the original numeric snapshot. This numeric rollback cannot undo a
 
 Static evidence for this design includes: OG `Actor::DoHitMe` at `0x140E01630` snapshots HitData `+0x90` into `XMM13` at `0x140E01751`; `0x140E018E2` moves it to `XMM1`; `0x140E018F0` calls `FUN_140D79EB0`, which applies conditions/difficulty and calls the Health ActorValue path. `FUN_140FC00B0` copies `+0x90` into `+0x94` at its resistance-calculation entry and uses `+0x98` as resistance input. Those observations support candidate stage labels and fixture boundaries only.
 
-Not established by this prototype: exact native adapter data for every attack type, a universal WRF/CSF field mask, Prediction business policy, event consistency if Incoming Health changes after TESHitEvent, runtime threading, or production hook safety. The header uses standard-layout/fixed-width records and asserts Win64 layout, but it remains a C++ research header; no real cross-DLL handshake, exported C entrypoint, compiler-matrix ABI test, or DLL unload test has been performed. All fixture PASS results prove only offline code behavior.
+Not established by this prototype: exact native adapter data for every attack type, a universal WRF/CSF field mask, Prediction business policy, event consistency if Incoming Health changes after TESHitEvent, runtime threading, or production hook safety. The original C++ research interface is not itself a cross-DLL ABI. Phase 1R adds a separate C-compatible candidate and Windows DLL fixtures; these establish only the tested local MSVC module combination, not all compilers, CRTs, loader states, or game behavior.
+
+## Dispatcher shutdown contract
+
+`Dispatcher::Shutdown()` closes a packed atomic call gate before draining it. Each public register, unregister, quiescence, and dispatch call must acquire a gate lease before touching a registry. Shutdown waits until those leases reach zero, then exchanges each atomic snapshot with an empty shared pointer and clears retirement storage. The cleanup path creates no replacement vector, map node, or `shared_ptr` and performs no `push_back`/`make_shared`. A fixture overrides global allocation and makes every allocation fail during shutdown; shutdown still completes.
+
+Calling Shutdown from a callback on the same Dispatcher returns `WouldDeadlock`. A failed wait leaves the gate closed and retains registry state so the owner may retry. The destructor calls Shutdown as a final guard and terminates rather than freeing state if a safe drain cannot be established. This does **not** support concurrent destruction: the owner must stop issuing new calls, call Shutdown, and join all threads that could have entered the object before destruction. In particular, no C++ object can protect itself from a caller that dereferences it after its storage has been freed.
+
+For the mock Host DLL, the Dispatcher is initialized lazily on the first supported interface query, after `LoadLibrary` returns. The owner must stop creating calls through copied interface tables, call exported `IIF_CombatBus_Shutdown`, wait for success, join its caller threads, and only then call `FreeLibrary` on the Host. The Host destructor requires prior successful Shutdown and never starts a drain while the DLL is unloading. Provider DLL code and context stay owned by the Provider until stage-correct `unregister_provider` followed by successful `wait_provider_quiescent`, or until successful global Host shutdown has drained every Host call. `Removed` alone never permits unload. No lifecycle work runs in `DllMain`.
+
+## C ABI candidate and DLL fixtures
+
+`include/CombatBusCABI.h` is a C11/C++-compatible Win64 candidate. All enums/statuses are represented by `uint32_t` constants; public function parameters use fixed-width values and plain structs. The exact V3 query rejects unsupported versions and non-exact `struct_size` values. The exported entrypoints are:
+
+- `IIF_CombatBus_QueryInterface(version, caller_size, out_interface)` — copies the function table into caller-owned storage.
+- `IIF_CombatBus_Shutdown()` — closes the Host gate and drains entered calls.
+
+The table's `registry` pointer and function pointers are borrowed from the Host DLL. The caller must not use them after Host shutdown, and must not call through them after `FreeLibrary`. Provider IDs are copied during registration. Callback and `provider_context` addresses remain owned by the Provider DLL and must stay valid until unregister plus quiescence or a successful global shutdown drain. No C++ container, string, exception, allocator-owned object, or CRT object crosses the boundary.
+
+The x64 layout assertions are compiled in both C and C++. Key records include `DamageSnapshot` (28 bytes, alignment 4), Outgoing context (80 bytes, alignment 8), Incoming context (56 bytes, alignment 8), Provider descriptors (40 bytes), and Interface (64 bytes, alignment 8). `CrossDllHost.exe` uses `LoadLibrary` and `GetProcAddress`; it does not link against C++ Dispatcher methods. `combatbus_iif_mock.dll` contains the Dispatcher and C adapter. `combatbus_test_provider.dll` independently owns WRF, CSF, and PAS callbacks and their context.
+
+The callback contract forbids C++ exceptions from escaping a Provider callback. A Provider written in C++ must catch exceptions inside its own module and return `Failure`; the Host-side adapter's catch is only defensive and is not an ABI promise for cross-runtime unwinding.
 
 ## Build and run
 
-Configure with CMake using an available C++20 compiler, then build and run CTest. The generated executable and build tree must remain under this directory.
+Configure with CMake using an available C++20 compiler, then build and run CTest. Keep the build directory outside this source directory and repository, for example:
+
+```powershell
+cmake -S research/combatbus-v3-offline -B "$env:TEMP\combatbus-phase1r-build" -A x64
+cmake --build "$env:TEMP\combatbus-phase1r-build" --config Release
+ctest --test-dir "$env:TEMP\combatbus-phase1r-build" -C Release --output-on-failure
+```
+
+The Windows x64 configuration builds the original single-EXE fixtures plus the independent Host DLL, Provider DLL, and dynamic-loading Host executable. On non-Windows or non-x64 hosts, CMake reports that the cross-DLL target is unsupported and does not claim that test passed.
+
+Phase 1R local verification: MSVC 19.50.35728 Release passed both CTest targets; Clang-cl 21.1.8 Release passed both targets. Two mixed runs also passed (MSVC Host/Provider with Clang-cl IIF, then MSVC Host/IIF with Clang-cl Provider). The MSVC cross-DLL Host fixture passed 25 consecutive extra runs. MSVC AddressSanitizer Release passed both targets after adding `/Zi` and making the sanitizer runtime directory available on `PATH`. These are local offline results, not CI attestations or game-runtime validation.

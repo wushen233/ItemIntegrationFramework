@@ -8,11 +8,35 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <vector>
 
 using namespace IIF::CombatBus::PrototypeV3;
+
+namespace {
+	std::atomic<bool> g_failGlobalAllocations{ false };
+}
+
+void* operator new(std::size_t size)
+{
+	if (g_failGlobalAllocations.load(std::memory_order_relaxed)) throw std::bad_alloc{};
+	if (void* allocation = std::malloc(size == 0 ? 1 : size)) return allocation;
+	throw std::bad_alloc{};
+}
+
+void* operator new[](std::size_t size)
+{
+	if (g_failGlobalAllocations.load(std::memory_order_relaxed)) throw std::bad_alloc{};
+	if (void* allocation = std::malloc(size == 0 ? 1 : size)) return allocation;
+	throw std::bad_alloc{};
+}
+
+void operator delete(void* allocation) noexcept { std::free(allocation); }
+void operator delete[](void* allocation) noexcept { std::free(allocation); }
+void operator delete(void* allocation, std::size_t) noexcept { std::free(allocation); }
+void operator delete[](void* allocation, std::size_t) noexcept { std::free(allocation); }
 
 namespace {
 	int g_failures = 0;
@@ -868,6 +892,109 @@ namespace {
 		Require(incomingResult.status == DispatchStatus::NoChange,
 			"IncomingHealth uses its distinct phase-specific registry");
 	}
+
+	void TestDispatcherShutdownContract()
+	{
+		{
+			Dispatcher empty;
+			Require(empty.Shutdown() == ShutdownStatus::Complete &&
+				empty.Shutdown() == ShutdownStatus::Complete,
+				"Shutdown with no Providers is successful and idempotent");
+			Require(empty.DispatchOutgoing(MakeOutgoing()).status == DispatchStatus::DispatcherClosed,
+				"dispatch is rejected after shutdown");
+			const auto provider = MakeOutgoingProvider("closed-registration", 1,
+				EvaluationCalculation, nullptr, &CountProvider);
+			Require(empty.RegisterOutgoing(&provider).status == RegistrationStatus::DispatcherClosed,
+				"registration is rejected after shutdown");
+			Require(empty.UnregisterOutgoing({ 1 }) == UnregisterStatus::DispatcherClosed &&
+				empty.WaitOutgoingQuiescent({ 1 }) == QuiescenceStatus::DispatcherClosed,
+				"unregister and wait are rejected after shutdown");
+		}
+
+		{
+			Dispatcher populated;
+			const auto provider = MakeOutgoingProvider("shutdown-active-provider", 1,
+				EvaluationCalculation, nullptr, &CountProvider);
+			Require(populated.RegisterOutgoing(&provider).added,
+				"register active Provider before explicit shutdown");
+			g_failGlobalAllocations.store(true, std::memory_order_release);
+			const auto shutdown = populated.Shutdown();
+			g_failGlobalAllocations.store(false, std::memory_order_release);
+			Require(shutdown == ShutdownStatus::Complete,
+				"shutdown cleanup succeeds while every global allocation is forced to fail");
+			Require(populated.DispatchOutgoing(MakeOutgoing()).status == DispatchStatus::DispatcherClosed,
+				"cleared active Provider snapshot cannot dispatch after shutdown");
+		}
+
+		{
+			Dispatcher draining;
+			const auto provider = MakeOutgoingProvider("shutdown-blocked-provider", 1,
+				EvaluationCalculation, nullptr, &BlockingProvider);
+			const auto registered = draining.RegisterOutgoing(&provider);
+			Require(registered.added, "register blocking Provider before shutdown drain");
+			{
+				std::scoped_lock lock{ g_gateMutex };
+				g_callbackEntered = false;
+				g_callbackRelease = false;
+			}
+			std::thread caller([&] { (void)draining.DispatchOutgoing(MakeOutgoing()); });
+			{
+				std::unique_lock lock{ g_gateMutex };
+				g_gateCv.wait(lock, [] { return g_callbackEntered; });
+			}
+			Require(draining.UnregisterOutgoing(registered.handle) == UnregisterStatus::Removed,
+				"unregister active callback before shutdown without claiming quiescence");
+			std::atomic<bool> shutdownReturned{ false };
+			std::atomic<ShutdownStatus> shutdownStatus{ ShutdownStatus::WaitFailure };
+			std::thread shutdownThread([&] {
+				shutdownStatus.store(draining.Shutdown(), std::memory_order_release);
+				shutdownReturned.store(true, std::memory_order_release);
+			});
+			while (draining.IsAcceptingCallsForTesting()) std::this_thread::yield();
+			Require(!shutdownReturned.load(std::memory_order_acquire),
+				"Shutdown remains blocked while an entered Provider callback is active");
+			Require(draining.DispatchOutgoing(MakeOutgoing()).status == DispatchStatus::DispatcherClosed,
+				"new dispatch is rejected while Shutdown drains prior calls");
+			{
+				std::scoped_lock lock{ g_gateMutex };
+				g_callbackRelease = true;
+			}
+			g_gateCv.notify_all();
+			caller.join();
+			shutdownThread.join();
+			Require(shutdownStatus.load(std::memory_order_acquire) == ShutdownStatus::Complete &&
+				shutdownReturned.load(std::memory_order_acquire),
+				"Shutdown drains an unregistered-but-not-quiescent Provider and external caller");
+			Require(draining.WaitOutgoingQuiescent(registered.handle) == QuiescenceStatus::DispatcherClosed,
+				"successful Dispatcher Shutdown itself is the global callback drain barrier");
+		}
+
+		{
+			Dispatcher selfShutdown;
+			std::atomic<ShutdownStatus> callbackShutdown{ ShutdownStatus::Complete };
+			struct State { Dispatcher* dispatcher; std::atomic<ShutdownStatus>* status; };
+			State state{ &selfShutdown, &callbackShutdown };
+			auto callback = +[](void* opaque, const OutgoingCalculationContextV3*,
+				OutgoingResultV3* result) -> CallbackStatus {
+				auto& callbackState = *static_cast<State*>(opaque);
+				callbackState.status->store(callbackState.dispatcher->Shutdown(), std::memory_order_release);
+				result->status = CallbackStatus::NoChange;
+				result->componentMask = ComponentNone;
+				result->multiplier = 1.0f;
+				return CallbackStatus::NoChange;
+			};
+			const auto provider = MakeOutgoingProvider("callback-shutdown", 1,
+				EvaluationCalculation, &state, callback);
+			Require(selfShutdown.RegisterOutgoing(&provider).added,
+				"register Provider that attempts callback-local shutdown");
+			Require(selfShutdown.DispatchOutgoing(MakeOutgoing()).status == DispatchStatus::NoChange &&
+				callbackShutdown.load(std::memory_order_acquire) == ShutdownStatus::WouldDeadlock,
+				"callback-local Shutdown reports WouldDeadlock without closing the Dispatcher");
+			Require(selfShutdown.IsAcceptingCallsForTesting() &&
+				selfShutdown.Shutdown() == ShutdownStatus::Complete,
+				"external owner can shut down after callback-local request is rejected");
+		}
+	}
 }
 
 int main()
@@ -890,6 +1017,7 @@ int main()
 	TestSelfUnregisterCannotWaitInsideCallback();
 	TestConcurrentPublishAndDispatch();
 	TestStableTieOrderingAndSeparateInterfaces();
+	TestDispatcherShutdownContract();
 	if (g_failures == 0) {
 		std::cout << "PASS: all Phase 1O offline fixtures\n";
 		return EXIT_SUCCESS;

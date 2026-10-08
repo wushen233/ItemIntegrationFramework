@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <map>
 #include <thread>
@@ -19,6 +20,8 @@ namespace {
 	thread_local std::uint32_t g_dispatchDepth = 0;
 	thread_local const void* g_callbackStack[64]{};
 	thread_local std::uint32_t g_callbackDepth = 0;
+	thread_local const void* g_apiCallStack[64]{};
+	thread_local std::uint32_t g_apiCallDepth = 0;
 	std::atomic<UnregisterFailurePoint> g_unregisterFailurePoint{ UnregisterFailurePoint::None };
 
 	[[nodiscard]] bool ConsumeUnregisterFailure(UnregisterFailurePoint point) noexcept
@@ -76,6 +79,83 @@ namespace {
 		}
 		return false;
 	}
+
+	[[nodiscard]] bool IsActiveApiCall(const void* owner) noexcept
+	{
+		for (std::uint32_t index = 0; index < g_apiCallDepth; ++index) {
+			if (g_apiCallStack[index] == owner) return true;
+		}
+		return false;
+	}
+
+	class CallGate final {
+		static constexpr std::uint64_t kClosed = std::uint64_t{ 1 } << 63;
+		static constexpr std::uint64_t kCountMask = ~kClosed;
+
+	public:
+		[[nodiscard]] bool TryEnter() noexcept
+		{
+			auto state = _state.load(std::memory_order_acquire);
+			for (;;) {
+				if ((state & kClosed) != 0 || (state & kCountMask) == kCountMask) return false;
+				if (_state.compare_exchange_weak(state, state + 1, std::memory_order_acq_rel,
+					std::memory_order_acquire)) return true;
+			}
+		}
+
+		void Leave() noexcept
+		{
+			const auto previous = _state.fetch_sub(1, std::memory_order_acq_rel);
+			if ((previous & kClosed) != 0 && (previous & kCountMask) == 1) {
+				_state.notify_all();
+			}
+		}
+
+		[[nodiscard]] bool CloseAndWait() noexcept
+		{
+			_state.fetch_or(kClosed, std::memory_order_acq_rel);
+			auto state = _state.load(std::memory_order_acquire);
+			while ((state & kCountMask) != 0) {
+				_state.wait(state, std::memory_order_acquire);
+				state = _state.load(std::memory_order_acquire);
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool IsClosed() const noexcept
+		{
+			return (_state.load(std::memory_order_acquire) & kClosed) != 0;
+		}
+
+	private:
+		std::atomic<std::uint64_t> _state{};
+	};
+
+	class ApiCallGuard final {
+	public:
+		ApiCallGuard(CallGate& gate, const void* owner) noexcept : _gate(&gate)
+		{
+			if (!gate.TryEnter()) return;
+			if (g_apiCallDepth >= std::size(g_apiCallStack)) {
+				gate.Leave();
+				return;
+			}
+			g_apiCallStack[g_apiCallDepth++] = owner;
+			_entered = true;
+		}
+		~ApiCallGuard()
+		{
+			if (_entered) {
+				g_apiCallStack[--g_apiCallDepth] = nullptr;
+				_gate->Leave();
+			}
+		}
+		[[nodiscard]] bool Entered() const noexcept { return _entered; }
+
+	private:
+		CallGate* _gate;
+		bool _entered{};
+	};
 
 	[[nodiscard]] RegistrationStatus CopyAndValidateId(const char* id, std::string& copied) noexcept
 	{
@@ -327,21 +407,15 @@ namespace {
 
 	public:
 		StageRegistry() : _snapshot(std::make_shared<const ProviderList>()) {}
-		~StageRegistry()
+		~StageRegistry() = default;
+
+		// Must only run after the Dispatcher call gate is closed and drained.
+		// Atomic exchange and container destruction release ownership without
+		// constructing replacement snapshots or allocating memory.
+		void ShutdownNoAlloc() noexcept
 		{
-			std::vector<std::shared_ptr<Entry>> entries;
-			{
-				std::scoped_lock lock{ _writeMutex };
-				const auto current = _snapshot.load(std::memory_order_acquire);
-				entries = *current;
-				for (const auto& [unused, entry] : _retired) {
-					(void)unused;
-					entries.push_back(entry);
-				}
-				for (const auto& entry : entries) entry->Disable();
-				_snapshot.store(std::make_shared<const ProviderList>(), std::memory_order_release);
-			}
-			for (const auto& entry : entries) entry->Wait();
+			(void)_snapshot.exchange(Snapshot{}, std::memory_order_acq_rel);
+			_retired.clear();
 		}
 
 		RegistrationResult Register(const Descriptor* descriptor, ProviderHandleV3 handle)
@@ -578,6 +652,9 @@ struct Dispatcher::Impl {
 	StageRegistry<OutgoingStage> outgoing;
 	StageRegistry<IncomingStage> incoming;
 	std::atomic<std::uint64_t> nextHandle{ 1 };
+	CallGate calls;
+	std::mutex shutdownMutex;
+	bool shutdownComplete{};
 
 	bool AllocateHandle(ProviderHandleV3& handle) noexcept
 	{
@@ -600,42 +677,83 @@ void Testing::FailNextUnregisterAt(UnregisterFailurePoint point) noexcept
 }
 
 Dispatcher::Dispatcher() : _impl(std::make_unique<Impl>()) {}
-Dispatcher::~Dispatcher() = default;
+Dispatcher::~Dispatcher()
+{
+	if (_impl && !_impl->shutdownComplete && Shutdown() != ShutdownStatus::Complete) std::terminate();
+}
+
+ShutdownStatus Dispatcher::Shutdown() noexcept
+{
+	if (!_impl) return ShutdownStatus::Complete;
+	if (IsActiveApiCall(_impl.get())) return ShutdownStatus::WouldDeadlock;
+	try {
+		std::scoped_lock lock{ _impl->shutdownMutex };
+		if (_impl->shutdownComplete) return ShutdownStatus::Complete;
+		if (!_impl->calls.CloseAndWait()) return ShutdownStatus::WaitFailure;
+		_impl->outgoing.ShutdownNoAlloc();
+		_impl->incoming.ShutdownNoAlloc();
+		_impl->shutdownComplete = true;
+		return ShutdownStatus::Complete;
+	} catch (...) {
+		return ShutdownStatus::WaitFailure;
+	}
+}
+
+bool Dispatcher::IsAcceptingCallsForTesting() const noexcept
+{
+	return _impl && !_impl->calls.IsClosed();
+}
 
 RegistrationResult Dispatcher::RegisterOutgoing(const OutgoingProviderV3* provider)
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return { RegistrationStatus::DispatcherClosed, {}, false };
 	ProviderHandleV3 handle{};
 	if (!_impl->AllocateHandle(handle)) return { RegistrationStatus::HandleExhausted, {}, false };
 	return _impl->outgoing.Register(provider, handle);
 }
 RegistrationResult Dispatcher::RegisterIncoming(const IncomingHealthProviderV3* provider)
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return { RegistrationStatus::DispatcherClosed, {}, false };
 	ProviderHandleV3 handle{};
 	if (!_impl->AllocateHandle(handle)) return { RegistrationStatus::HandleExhausted, {}, false };
 	return _impl->incoming.Register(provider, handle);
 }
 UnregisterStatus Dispatcher::UnregisterOutgoing(ProviderHandleV3 handle)
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return UnregisterStatus::DispatcherClosed;
 	return _impl->outgoing.Unregister(handle);
 }
 UnregisterStatus Dispatcher::UnregisterIncoming(ProviderHandleV3 handle)
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return UnregisterStatus::DispatcherClosed;
 	return _impl->incoming.Unregister(handle);
 }
 QuiescenceStatus Dispatcher::WaitOutgoingQuiescent(ProviderHandleV3 handle)
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return QuiescenceStatus::DispatcherClosed;
 	return _impl->outgoing.WaitQuiescent(handle);
 }
 QuiescenceStatus Dispatcher::WaitIncomingQuiescent(ProviderHandleV3 handle)
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return QuiescenceStatus::DispatcherClosed;
 	return _impl->incoming.WaitQuiescent(handle);
 }
 OutgoingDispatchV3 Dispatcher::DispatchOutgoing(const OutgoingCalculationContextV3& context) const noexcept
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return OutgoingIdentity(DispatchStatus::DispatcherClosed, context.damage);
 	return _impl->outgoing.DispatchContext(context);
 }
 IncomingDispatchV3 Dispatcher::DispatchIncoming(const IncomingHealthContextV3& context) const noexcept
 {
+	ApiCallGuard call{ _impl->calls, _impl.get() };
+	if (!call.Entered()) return IncomingIdentity(DispatchStatus::DispatcherClosed, context.healthDamage);
 	return _impl->incoming.DispatchContext(context);
 }
 }

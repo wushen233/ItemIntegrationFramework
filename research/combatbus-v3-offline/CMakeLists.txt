@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
-project(CombatBusPhase1OOffline LANGUAGES CXX)
+project(CombatBusPhase1ROffline LANGUAGES C CXX)
 
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -18,3 +20,40 @@ endif()
 
 enable_testing()
 add_test(NAME combatbus_phase1o_fixtures COMMAND combatbus_phase1o_fixtures)
+
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+	add_library(combatbus_iif_mock SHARED
+		src/CombatBusPrototype.cpp
+		src/CombatBusCABI.cpp)
+	target_include_directories(combatbus_iif_mock PRIVATE include)
+	target_compile_definitions(combatbus_iif_mock PRIVATE IIF_CB_HOST_EXPORTS)
+
+	add_library(combatbus_test_provider SHARED tests/MockProviderDll.cpp)
+	target_include_directories(combatbus_test_provider PRIVATE include)
+
+	add_executable(combatbus_cross_dll_host
+		tests/CrossDllHost.cpp
+		tests/CAbiHeaderSmoke.c)
+	target_include_directories(combatbus_cross_dll_host PRIVATE include)
+
+	foreach(target combatbus_iif_mock combatbus_test_provider combatbus_cross_dll_host)
+		if(MSVC)
+			target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
+		else()
+			target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+		endif()
+		set_target_properties(${target} PROPERTIES
+			RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+			RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
+			RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+			RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/bin/RelWithDebInfo"
+			RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/bin/MinSizeRel")
+	endforeach()
+
+	add_test(NAME combatbus_cross_dll_abi_and_lifecycle
+		COMMAND combatbus_cross_dll_host
+			$<TARGET_FILE:combatbus_iif_mock>
+			$<TARGET_FILE:combatbus_test_provider>)
+else()
+	message(STATUS "Windows x64 cross-DLL ABI targets are not supported by this build host")
+endif()

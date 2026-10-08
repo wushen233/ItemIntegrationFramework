@@ -44,11 +44,13 @@ namespace IIF::CombatBus::PrototypeV3 {
 		ProviderFailure = 5,
 		InvalidProviderResult = 6,
 		RecursiveDispatch = 7,
-		NoChange = 8
+		NoChange = 8,
+		DispatcherClosed = 9
 	};
-	enum class RegistrationStatus : Enum32 { Added = 0, Duplicate = 1, InvalidDescriptor = 2, InvalidId = 3, AllocationFailure = 4, HandleExhausted = 5 };
-	enum class UnregisterStatus : Enum32 { Removed = 0, NotFound = 1, AllocationFailure = 2 };
-	enum class QuiescenceStatus : Enum32 { Quiescent = 0, NotFound = 1, WouldDeadlock = 2, WaitFailure = 3 };
+	enum class RegistrationStatus : Enum32 { Added = 0, Duplicate = 1, InvalidDescriptor = 2, InvalidId = 3, AllocationFailure = 4, HandleExhausted = 5, DispatcherClosed = 6 };
+	enum class UnregisterStatus : Enum32 { Removed = 0, NotFound = 1, AllocationFailure = 2, DispatcherClosed = 3 };
+	enum class QuiescenceStatus : Enum32 { Quiescent = 0, NotFound = 1, WouldDeadlock = 2, WaitFailure = 3, DispatcherClosed = 4 };
+	enum class ShutdownStatus : Enum32 { Complete = 0, WouldDeadlock = 1, WaitFailure = 2 };
 	// InterfaceV3 unregister/wait routing values; Provider handles are Dispatcher-global.
 	enum class ProviderStage : Enum32 { OutgoingCalculation = 1, IncomingHealthProcessing = 2 };
 	enum class UnregisterFailurePoint : Enum32 { None = 0, SnapshotPreparation = 1, RetirementInsertion = 2 };
@@ -191,6 +193,12 @@ namespace IIF::CombatBus::PrototypeV3 {
 		~Dispatcher();
 		Dispatcher(const Dispatcher&) = delete;
 		Dispatcher& operator=(const Dispatcher&) = delete;
+
+		// Close rejects new API calls, waits for already-entered calls, then clears
+		// registries without allocating. The owner must stop/join callers before
+		// destroying this object; Shutdown does not make concurrent destruction safe.
+		ShutdownStatus Shutdown() noexcept;
+		bool IsAcceptingCallsForTesting() const noexcept;
 
 		RegistrationResult RegisterOutgoing(const OutgoingProviderV3* provider);
 		RegistrationResult RegisterIncoming(const IncomingHealthProviderV3* provider);
