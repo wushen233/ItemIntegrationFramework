@@ -176,19 +176,19 @@ namespace {
 			return false;
 		}
 		GetOutgoingFn getWRF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetWRF");
-		const auto getCSF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetCSF");
-		const auto getPAS = Resolve<GetIncomingFn>(providerModule, "TestProvider_GetPAS");
-		const auto getInvalid = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetInvalid");
+		auto getCSF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetCSF");
+		auto getPAS = Resolve<GetIncomingFn>(providerModule, "TestProvider_GetPAS");
+		auto getInvalid = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetInvalid");
 		ResetFn resetProvider = Resolve<ResetFn>(providerModule, "TestProvider_Reset");
 		BlockFn blockWRF = Resolve<BlockFn>(providerModule, "TestProvider_BlockWRF");
 		WaitEnteredFn waitWRFEntered = Resolve<WaitEnteredFn>(providerModule, "TestProvider_WaitWRFEntered");
 		ReleaseFn releaseWRF = Resolve<ReleaseFn>(providerModule, "TestProvider_ReleaseWRF");
-		const auto getCounter = Resolve<CounterFn>(providerModule, "TestProvider_GetCounter");
-		const auto getObserved = Resolve<ObservedFn>(providerModule, "TestProvider_GetObserved");
-		const auto getOrder = Resolve<OrderFn>(providerModule, "TestProvider_GetOrder");
-		const auto setShutdown = Resolve<SetShutdownFn>(providerModule, "TestProvider_SetShutdown");
-		const auto triggerShutdown = Resolve<TriggerShutdownFn>(providerModule, "TestProvider_TriggerShutdown");
-		const auto getCallbackShutdownStatus = Resolve<CallbackShutdownStatusFn>(providerModule,
+		auto getCounter = Resolve<CounterFn>(providerModule, "TestProvider_GetCounter");
+		auto getObserved = Resolve<ObservedFn>(providerModule, "TestProvider_GetObserved");
+		auto getOrder = Resolve<OrderFn>(providerModule, "TestProvider_GetOrder");
+		auto setShutdown = Resolve<SetShutdownFn>(providerModule, "TestProvider_SetShutdown");
+		auto triggerShutdown = Resolve<TriggerShutdownFn>(providerModule, "TestProvider_TriggerShutdown");
+		auto getCallbackShutdownStatus = Resolve<CallbackShutdownStatusFn>(providerModule,
 			"TestProvider_GetCallbackShutdownStatus");
 		const auto setQuiescenceHook = Resolve<SetQuiescenceHookFn>(hostModule,
 			"IIF_CombatBus_Test_SetQuiescenceClaimHook");
@@ -432,12 +432,31 @@ namespace {
 		providerModule = LoadLibraryW(providerPath);
 		Check(providerModule != nullptr, "Provider DLL reloads for Host Shutdown drain test");
 		if (providerModule) {
+			// Every export address belongs to the loaded module instance. The first
+			// Provider instance was unloaded above, so refresh the entire export set;
+			// retaining even a test-only function pointer (notably GetCounter) can call
+			// into provider.dll_unloaded if the loader maps the new instance elsewhere.
 			getWRF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetWRF");
+			getCSF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetCSF");
+			getPAS = Resolve<GetIncomingFn>(providerModule, "TestProvider_GetPAS");
+			getInvalid = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetInvalid");
 			blockWRF = Resolve<BlockFn>(providerModule, "TestProvider_BlockWRF");
 			waitWRFEntered = Resolve<WaitEnteredFn>(providerModule, "TestProvider_WaitWRFEntered");
 			releaseWRF = Resolve<ReleaseFn>(providerModule, "TestProvider_ReleaseWRF");
 			resetProvider = Resolve<ResetFn>(providerModule, "TestProvider_Reset");
+			getCounter = Resolve<CounterFn>(providerModule, "TestProvider_GetCounter");
+			getObserved = Resolve<ObservedFn>(providerModule, "TestProvider_GetObserved");
+			getOrder = Resolve<OrderFn>(providerModule, "TestProvider_GetOrder");
+			setShutdown = Resolve<SetShutdownFn>(providerModule, "TestProvider_SetShutdown");
+			triggerShutdown = Resolve<TriggerShutdownFn>(providerModule, "TestProvider_TriggerShutdown");
+			getCallbackShutdownStatus = Resolve<CallbackShutdownStatusFn>(providerModule,
+				"TestProvider_GetCallbackShutdownStatus");
+			Check(getWRF && getCSF && getPAS && getInvalid && blockWRF && waitWRFEntered && releaseWRF &&
+				resetProvider && getCounter && getObserved && getOrder && setShutdown && triggerShutdown &&
+				getCallbackShutdownStatus,
+				"all Provider exports are rebound from the reloaded DLL instance before further use");
 			resetProvider();
+			setShutdown(shutdown);
 			wrf = {};
 			wrf.struct_size = sizeof(wrf); wrf.version = IIF_CB_VERSION_3;
 			IIF_CB_RegistrationV3 shutdownRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };

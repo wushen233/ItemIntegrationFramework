@@ -278,4 +278,127 @@ _Static_assert(offsetof(IIF_CB_InterfaceV3, wait_provider_quiescent) == 40, "int
 _Static_assert(offsetof(IIF_CB_InterfaceV3, dispatch_incoming) == 56, "interface incoming offset");
 #endif
 
+/* Keep the full Win64 public-layout contract checked in both C and C++. */
+#ifdef __cplusplus
+#define IIF_CB_LAYOUT_ASSERT(expression) static_assert((expression), #expression)
+#define IIF_CB_LAYOUT_ALIGNOF(type) alignof(type)
+#else
+#define IIF_CB_LAYOUT_ASSERT(expression) _Static_assert((expression), #expression)
+#define IIF_CB_LAYOUT_ALIGNOF(type) _Alignof(type)
+#endif
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_DamageSnapshotV3) == 28);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_DamageSnapshotV3) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, valid_mask) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, health_damage) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, physical_damage) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, total_damage) == 16);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, targeted_limb_damage) == 20);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_DamageSnapshotV3, resistance_intermediate) == 24);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_OutgoingContextV3) == 80);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_OutgoingContextV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, evaluation_kind) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, attacker_kind) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, profile) == 16);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, modifiable_mask) == 20);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, attacker) == 24);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, target) == 32);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, weapon) == 40);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingContextV3, damage) == 48);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_OutgoingResultV3) == 20);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_OutgoingResultV3) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingResultV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingResultV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingResultV3, status) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingResultV3, component_mask) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingResultV3, multiplier) == 16);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_IncomingContextV3) == 56);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_IncomingContextV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, phase) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, confidence) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, target_kind) == 16);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, power_armor) == 20);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, attacker) == 24);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, target) == 32);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, weapon) == 40);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingContextV3, health_damage) == 48);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_IncomingResultV3) == 20);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_IncomingResultV3) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingResultV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingResultV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingResultV3, status) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingResultV3, reserved) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingResultV3, multiplier) == 16);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_OutgoingProviderV3) == 40);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_OutgoingProviderV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, provider_id) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, priority) == 16);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, evaluation_mask) == 20);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, provider_context) == 24);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingProviderV3, callback) == 32);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_IncomingProviderV3) == 40);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_IncomingProviderV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, provider_id) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, priority) == 16);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, reserved) == 20);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, provider_context) == 24);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingProviderV3, callback) == 32);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_ProviderHandleV3) == 8);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_ProviderHandleV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_ProviderHandleV3, value) == 0);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_RegistrationV3) == 24);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_RegistrationV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_RegistrationV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_RegistrationV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_RegistrationV3, status) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_RegistrationV3, added) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_RegistrationV3, handle) == 16);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_OutgoingDispatchV3) == 44);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_OutgoingDispatchV3) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingDispatchV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingDispatchV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingDispatchV3, status) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingDispatchV3, changed_mask) == 12);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_OutgoingDispatchV3, damage) == 16);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_IncomingDispatchV3) == 16);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_IncomingDispatchV3) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingDispatchV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingDispatchV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingDispatchV3, status) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_IncomingDispatchV3, health_damage) == 12);
+
+IIF_CB_LAYOUT_ASSERT(sizeof(IIF_CB_InterfaceV3) == 64);
+IIF_CB_LAYOUT_ASSERT(IIF_CB_LAYOUT_ALIGNOF(IIF_CB_InterfaceV3) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, struct_size) == 0);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, version) == 4);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, registry) == 8);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, register_outgoing) == 16);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, register_incoming) == 24);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, unregister_provider) == 32);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, wait_provider_quiescent) == 40);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, dispatch_outgoing) == 48);
+IIF_CB_LAYOUT_ASSERT(offsetof(IIF_CB_InterfaceV3, dispatch_incoming) == 56);
+
+#undef IIF_CB_LAYOUT_ALIGNOF
+#undef IIF_CB_LAYOUT_ASSERT
+
 #endif /* IIF_COMBATBUS_C_ABI_H */
