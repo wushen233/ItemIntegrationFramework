@@ -20,6 +20,9 @@ namespace {
 	constexpr std::uint64_t kCallCountMask = ~kClosedBit;
 	thread_local const void* g_hostCallStack[64]{};
 	thread_local std::uint32_t g_hostCallDepth{};
+#if defined(IIF_CB_TEST_HOOKS)
+	std::atomic<bool> g_failRegistrationAfterBridgeLink{};
+#endif
 
 	class HostCallGate final {
 	public:
@@ -226,6 +229,37 @@ namespace {
 			}
 		}
 
+		void RemoveBridge(BridgeBase* bridge) noexcept
+		{
+			try {
+				std::scoped_lock lock{ bridgesMutex };
+				auto* link = &bridges;
+				while (*link && link->get() != bridge) link = &((*link)->next);
+				if (*link) {
+					auto removed = std::move(*link);
+					*link = std::move(removed->next);
+				}
+			} catch (...) {
+				// A rollback failure must not escape a C ABI entrypoint. The only
+				// throwing operation here is mutex acquisition; retain ownership if
+				// it cannot be acquired rather than freeing a possibly published Bridge.
+			}
+		}
+
+#if defined(IIF_CB_TEST_HOOKS)
+		std::uint32_t BridgeCountForTesting() noexcept
+		{
+			try {
+				std::scoped_lock lock{ bridgesMutex };
+				std::uint32_t count{};
+				for (auto* bridge = bridges.get(); bridge; bridge = bridge->next.get()) ++count;
+				return count;
+			} catch (...) {
+				return std::numeric_limits<std::uint32_t>::max();
+			}
+		}
+#endif
+
 	private:
 		void ClearBridgesNoAlloc() noexcept
 		{
@@ -237,6 +271,18 @@ namespace {
 				bridges = std::move(next);
 			}
 		}
+	};
+
+	class BridgeRollback final {
+	public:
+		BridgeRollback(Host& host, BridgeBase* bridge) noexcept : _host(host), _bridge(bridge) {}
+		~BridgeRollback() { if (_bridge) _host.RemoveBridge(_bridge); }
+		BridgeRollback(const BridgeRollback&) = delete;
+		BridgeRollback& operator=(const BridgeRollback&) = delete;
+		void Release() noexcept { _bridge = nullptr; }
+	private:
+		Host& _host;
+		BridgeBase* _bridge;
 	};
 
 	Host& GetHost()
@@ -338,15 +384,15 @@ namespace {
 			bridge->providerContext = provider->provider_context;
 			auto* rawBridge = bridge.get();
 			g_host.LinkBridge(std::move(bridge));
+			BridgeRollback rollback{ g_host, rawBridge };
+#if defined(IIF_CB_TEST_HOOKS)
+			if (g_failRegistrationAfterBridgeLink.exchange(false, std::memory_order_acq_rel)) throw std::bad_alloc{};
+#endif
 			const OutgoingProviderV3 descriptor{ sizeof(OutgoingProviderV3), kInterfaceVersion,
 				provider->provider_id, provider->priority, provider->evaluation_mask, rawBridge,
 				&OutgoingBridge::Invoke };
 			const auto result = g_host.dispatcher.RegisterOutgoing(&descriptor);
 			if (!result.added) {
-				std::scoped_lock lock{ g_host.bridgesMutex };
-				auto* link = &g_host.bridges;
-				while (*link && link->get() != rawBridge) link = &((*link)->next);
-				if (*link) { auto removed = std::move(*link); *link = std::move(removed->next); }
 				const auto status = MapRegistration(result.status);
 				InitializeRegistration(output, status);
 				return status;
@@ -355,6 +401,7 @@ namespace {
 			rawBridge->stage = IIF_CB_STAGE_OUTGOING_CALCULATION;
 			*output = { sizeof(*output), IIF_CB_VERSION_3, IIF_CB_STATUS_OK, 1,
 				{ result.handle.value } };
+			rollback.Release();
 			return IIF_CB_STATUS_OK;
 		} catch (const std::bad_alloc&) {
 			InitializeRegistration(output, IIF_CB_STATUS_ALLOCATION_FAILURE);
@@ -387,14 +434,14 @@ namespace {
 			bridge->providerContext = provider->provider_context;
 			auto* rawBridge = bridge.get();
 			g_host.LinkBridge(std::move(bridge));
+			BridgeRollback rollback{ g_host, rawBridge };
+#if defined(IIF_CB_TEST_HOOKS)
+			if (g_failRegistrationAfterBridgeLink.exchange(false, std::memory_order_acq_rel)) throw std::bad_alloc{};
+#endif
 			const IncomingHealthProviderV3 descriptor{ sizeof(IncomingHealthProviderV3), kInterfaceVersion,
 				provider->provider_id, provider->priority, rawBridge, &IncomingBridge::Invoke };
 			const auto result = g_host.dispatcher.RegisterIncoming(&descriptor);
 			if (!result.added) {
-				std::scoped_lock lock{ g_host.bridgesMutex };
-				auto* link = &g_host.bridges;
-				while (*link && link->get() != rawBridge) link = &((*link)->next);
-				if (*link) { auto removed = std::move(*link); *link = std::move(removed->next); }
 				const auto status = MapRegistration(result.status);
 				InitializeRegistration(output, status);
 				return status;
@@ -403,6 +450,7 @@ namespace {
 			rawBridge->stage = IIF_CB_STAGE_INCOMING_HEALTH;
 			*output = { sizeof(*output), IIF_CB_VERSION_3, IIF_CB_STATUS_OK, 1,
 				{ result.handle.value } };
+			rollback.Release();
 			return IIF_CB_STATUS_OK;
 		} catch (const std::bad_alloc&) {
 			InitializeRegistration(output, IIF_CB_STATUS_ALLOCATION_FAILURE);
@@ -588,5 +636,15 @@ extern "C" IIF_CB_API void IIF_CB_CALL IIF_CombatBus_Test_SetQuiescenceClaimHook
 extern "C" IIF_CB_API void IIF_CB_CALL IIF_CombatBus_Test_FailNextQuiescenceWait(void)
 {
 	Testing::FailNextQuiescenceWait();
+}
+
+extern "C" IIF_CB_API void IIF_CB_CALL IIF_CombatBus_Test_FailNextRegistrationAfterBridgeLink(void)
+{
+	g_failRegistrationAfterBridgeLink.store(true, std::memory_order_release);
+}
+
+extern "C" IIF_CB_API std::uint32_t IIF_CB_CALL IIF_CombatBus_Test_GetBridgeCount(void)
+{
+	return g_host.BridgeCountForTesting();
 }
 #endif
