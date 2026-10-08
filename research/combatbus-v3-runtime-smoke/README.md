@@ -1,13 +1,35 @@
 # IIF CombatBus V3 Runtime Smoke Probe
 
-This is a temporary, test-only F4SE plugin for Fallout 4 OG 1.10.163. It is separate from the production IIF target and is not deployed by the build.
+Temporary, test-only F4SE plugin for Fallout 4 OG 1.10.163. It is separate from the production IIF target and is never deployed by a build step.
 
-At F4SE `kPostLoad`, it looks up the already-loaded `ItemIntegrationFramework.dll`, resolves `IIF_CombatBus_QueryInterface`, checks V3 success plus unsupported-version and structure-size rejection, and records an Outgoing no-provider identity probe using opaque local sentinels. It never registers a Provider. It logs through CommonLibF4 as `IIFCombatBusRuntimeSmoke.log`.
+## Default build: query-only
 
-The Incoming check intentionally passes `CONFIDENCE_UNKNOWN` and verifies fail-closed rejection with the value unchanged. A successful Incoming identity dispatch requires `VERIFIED_ADAPTER_CALLSITE`; this smoke plugin has no native adapter and must not manufacture that evidence. Incoming identity remains covered by offline Registry fixtures, not by this in-game probe.
+The default xmake option `outgoing_identity_smoke` is **OFF**. This build checks that the already-loaded IIF module exports `IIF_CombatBus_QueryInterface`, calls it at F4SE `kPostLoad`, verifies correct and incorrect version/size negotiation, and checks Incoming `CONFIDENCE_UNKNOWN` rejection with the value unchanged. It explicitly logs that synthetic Outgoing Dispatch was skipped. The default binary contains no call to `dispatch_outgoing`.
 
-Before running the Outgoing identity probe, use a test profile with no experimental V3 Provider plugins loaded. The probe requires an empty V3 Outgoing Registry. Existing legacy IIF consumers can remain enabled if they do not register V3 Providers. If that precondition is uncertain, do not run the probe; query/version checks alone are safe.
+Build into a scratch-local directory from the repository root:
 
-The plugin has no hooks, threads, timers, game tasks, or unload callbacks. It registers one F4SE message listener, runs once at `kPostLoad`, logs, and remains resident for process lifetime like the F4SE plugin host. It uses the already-required CommonLibF4 build dependency and adds no runtime library dependency beyond F4SE/CommonLib conventions.
+```powershell
+$env:COMMONLIBF4_PATH = '<path to the existing CommonLibF4 checkout>'
+xmake config --project=research/combatbus-v3-runtime-smoke -p windows -a x64 -m releasedbg --builddir=build/phase2c-query-only
+xmake build --project=research/combatbus-v3-runtime-smoke --target=IIFCombatBusRuntimeSmoke --jobs=4
+```
 
-Build from this directory with the selected CommonLibF4 profile. Outputs remain in this research checkout's ignored `build/` and `.xmake/` directories. The resulting DLL is a review artifact only; do not stage or deploy it until the test plan and binary are reviewed.
+## Optional build: synthetic Outgoing identity
+
+The opt-in build adds local sentinel values as simulated attacker/weapon pointers and calls Outgoing Dispatch. It is unsafe if any matching V3 Provider is registered, because the production ABI has no reliable Registry-emptiness query. Build or use this variant only after verifying a strict isolated test profile contains no V3 Provider DLLs. Never use real game object pointers and never forge Incoming adapter-callsite evidence.
+
+It has a distinct DLL basename and must use a separate build directory and checksum:
+
+```powershell
+$env:COMMONLIBF4_PATH = '<path to the existing CommonLibF4 checkout>'
+xmake config --project=research/combatbus-v3-runtime-smoke -p windows -a x64 -m releasedbg --outgoing_identity_smoke=y --builddir=build/phase2c-outgoing-opt-in
+xmake build --project=research/combatbus-v3-runtime-smoke --target=IIFCombatBusRuntimeSmoke --jobs=4
+```
+
+If the dispatch result is anything other than `NO_PROVIDERS`, stop the test and retain the log. This synthetic probe is not real combat calculation validation.
+
+## Safety and verification limits
+
+The plugin never registers a Provider, installs a hook, writes game memory, starts threads/timers, creates game tasks, or dereferences Actor/Weapon objects. It registers one F4SE message listener and remains resident for process lifetime. Query-only is the only default build. `tests/VerifyDefaultQueryOnly.ps1` checks that the synthetic Outgoing call and pointers stay behind the disabled compile-time option and that no verified Incoming confidence is forged.
+
+The GitHub Windows workflow tests the offline Registry/ABI fixtures; it does **not** compile or run this CommonLibF4 diagnostic plugin. Local xmake build results and DLL hashes must be reported separately. No DLL, EXE, PDB, or game log belongs in this source directory or public PR.

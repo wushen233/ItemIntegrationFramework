@@ -93,8 +93,10 @@ namespace {
 		REX::INFO("[IIF-CB-Smoke] V3 QueryInterface succeeded; table_size={}, version={}",
 			api.struct_size, api.version);
 
-		// These addresses are opaque, local sentinels. Dispatch must not dereference them.
-		std::uint8_t opaqueStorage{};
+		// The normal diagnostic build is query-only. The synthetic Outgoing test is
+		// compiled only into an explicitly named opt-in DLL for an isolated profile.
+#if defined(IIF_CB_RUNTIME_SMOKE_OUTGOING_IDENTITY)
+		std::uint8_t outgoingSentinel{};
 		IIF_CB_OutgoingContextV3 outgoing{};
 		outgoing.struct_size = sizeof(outgoing);
 		outgoing.version = IIF_CB_VERSION_3;
@@ -102,8 +104,8 @@ namespace {
 		outgoing.attacker_kind = IIF_CB_ACTOR_PLAYER;
 		outgoing.profile = IIF_CB_PROFILE_WEAPON_MELEE;
 		outgoing.modifiable_mask = IIF_CB_COMPONENT_HEALTH;
-		outgoing.attacker = &opaqueStorage;
-		outgoing.weapon = &opaqueStorage;
+		outgoing.attacker = &outgoingSentinel;
+		outgoing.weapon = &outgoingSentinel;
 		outgoing.damage = { sizeof(IIF_CB_DamageSnapshotV3), IIF_CB_COMPONENT_HEALTH,
 			37.5f, 0.0f, 0.0f, 0.0f, 0.0f };
 		IIF_CB_OutgoingDispatchV3 outgoingResult{};
@@ -116,9 +118,13 @@ namespace {
 			outgoingResult.damage.health_damage == outgoing.damage.health_damage;
 		REX::INFO("[IIF-CB-Smoke] empty-Registry Outgoing identity: call_status={}, dispatch_status={}, health={}, pass={}",
 			outgoingCallStatus, outgoingResult.status, outgoingResult.damage.health_damage, outgoingIdentity);
+#else
+		REX::INFO("[IIF-CB-Smoke] query-only build: synthetic Outgoing Dispatch is disabled");
+#endif
 
 		// A valid Incoming dispatch requires actual VerifiedAdapterCallsite evidence.
 		// This diagnostic plugin has no native adapter and deliberately does not forge it.
+		std::uint8_t incomingSentinel{};
 		IIF_CB_IncomingContextV3 incoming{};
 		incoming.struct_size = sizeof(incoming);
 		incoming.version = IIF_CB_VERSION_3;
@@ -126,7 +132,7 @@ namespace {
 		incoming.confidence = IIF_CB_CONFIDENCE_UNKNOWN;
 		incoming.target_kind = IIF_CB_ACTOR_PLAYER;
 		incoming.power_armor = IIF_CB_POWER_ARMOR_EQUIPPED;
-		incoming.target = &opaqueStorage;
+		incoming.target = &incomingSentinel;
 		incoming.health_damage = 53.25f;
 		IIF_CB_IncomingDispatchV3 incomingResult{};
 		incomingResult.struct_size = sizeof(incomingResult);

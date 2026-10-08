@@ -13,6 +13,12 @@ if not commonlibf4_path or not os.isdir(commonlibf4_path) then
 end
 includes(commonlibf4_path)
 
+option("outgoing_identity_smoke")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable the synthetic Outgoing identity probe for an isolated no-Provider test profile")
+option_end()
+
 target("IIFCombatBusRuntimeSmoke")
     set_kind("shared")
     add_rules("commonlibf4.plugin", {
@@ -21,5 +27,9 @@ target("IIFCombatBusRuntimeSmoke")
         description = "Temporary no-hook CombatBus V3 runtime smoke probe",
         version = "1.0.0"
     })
+    if has_config("outgoing_identity_smoke") then
+        add_defines("IIF_CB_RUNTIME_SMOKE_OUTGOING_IDENTITY")
+        set_basename("IIFCombatBusRuntimeSmoke_OutgoingOptIn")
+    end
     add_files("src/RuntimeSmoke.cpp")
     add_includedirs("../../src/CombatBusV3")
