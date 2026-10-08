@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <initializer_list>
 #include <iostream>
 #include <thread>
 
@@ -19,6 +20,9 @@ namespace {
 	using ShutdownFn = std::uint32_t (IIF_CB_CALL *)();
 	using GetOutgoingFn = std::uint32_t (IIF_CB_CALL *)(IIF_CB_OutgoingProviderV3*);
 	using GetIncomingFn = std::uint32_t (IIF_CB_CALL *)(IIF_CB_IncomingProviderV3*);
+	using SetValidationModeFn = void (IIF_CB_CALL *)(std::uint32_t);
+	using ValidationCallsFn = std::uint32_t (IIF_CB_CALL *)();
+	using TieOrderFn = std::uint32_t (IIF_CB_CALL *)(std::uint32_t);
 	using ResetFn = void (IIF_CB_CALL *)();
 	using BlockFn = void (IIF_CB_CALL *)();
 	using WaitEnteredFn = std::uint32_t (IIF_CB_CALL *)(std::uint32_t);
@@ -33,6 +37,16 @@ namespace {
 	using FailNextWaitFn = void (IIF_CB_CALL *)();
 	using FailNextRegistrationFn = void (IIF_CB_CALL *)();
 	using BridgeCountFn = std::uint32_t (IIF_CB_CALL *)();
+	enum ValidationMode : std::uint32_t {
+		ValidationNoChange = 0,
+		ValidationApply = 1,
+		ValidationBadStatus = 2,
+		ValidationBadSize = 3,
+		ValidationBadVersion = 4,
+		ValidationBadMultiplier = 5,
+		ValidationBadComponentMask = 6,
+		ValidationBadMultiplierRange = 7
+	};
 
 	struct WaitTargetState {
 		const IIF_CB_InterfaceV3* interfaceV3{};
@@ -264,6 +278,13 @@ namespace {
 		GetOutgoingFn getCSF{};
 		GetIncomingFn getPAS{};
 		GetOutgoingFn getInvalid{};
+		GetOutgoingFn getOutgoingValidation{};
+		GetIncomingFn getIncomingValidation{};
+		SetValidationModeFn setValidationMode{};
+		ValidationCallsFn getValidationCalls{};
+		GetOutgoingFn getTieAlpha{};
+		GetOutgoingFn getTieBeta{};
+		TieOrderFn getTieOrder{};
 		ResetFn resetProvider{};
 		BlockFn blockWRF{};
 		WaitEnteredFn waitWRFEntered{};
@@ -280,6 +301,13 @@ namespace {
 			ResolveRequired(providerModule, "TestProvider_GetCSF", getCSF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetPAS", getPAS, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetInvalid", getInvalid, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetOutgoingValidation", getOutgoingValidation, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetIncomingValidation", getIncomingValidation, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_SetValidationMode", setValidationMode, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetValidationCalls", getValidationCalls, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetTieAlpha", getTieAlpha, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetTieBeta", getTieBeta, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetTieOrder", getTieOrder, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
@@ -317,11 +345,22 @@ namespace {
 		csf.struct_size = sizeof(csf); csf.version = IIF_CB_VERSION_3;
 		IIF_CB_IncomingProviderV3 pas{};
 		pas.struct_size = sizeof(pas); pas.version = IIF_CB_VERSION_3;
+		IIF_CB_OutgoingProviderV3 outgoingValidation{};
+		outgoingValidation.struct_size = sizeof(outgoingValidation); outgoingValidation.version = IIF_CB_VERSION_3;
+		IIF_CB_OutgoingProviderV3 tieAlpha{};
+		tieAlpha.struct_size = sizeof(tieAlpha); tieAlpha.version = IIF_CB_VERSION_3;
+		IIF_CB_OutgoingProviderV3 tieBeta{};
+		tieBeta.struct_size = sizeof(tieBeta); tieBeta.version = IIF_CB_VERSION_3;
 		const auto wrfDescriptorStatus = getWRF(&wrf);
 		const auto csfDescriptorStatus = getCSF(&csf);
 		const auto pasDescriptorStatus = getPAS(&pas);
+		const auto outgoingValidationDescriptorStatus = getOutgoingValidation(&outgoingValidation);
+		const auto tieAlphaDescriptorStatus = getTieAlpha(&tieAlpha);
+		const auto tieBetaDescriptorStatus = getTieBeta(&tieBeta);
 		if (wrfDescriptorStatus != IIF_CB_STATUS_OK || csfDescriptorStatus != IIF_CB_STATUS_OK ||
-			pasDescriptorStatus != IIF_CB_STATUS_OK) {
+			pasDescriptorStatus != IIF_CB_STATUS_OK ||
+			outgoingValidationDescriptorStatus != IIF_CB_STATUS_OK ||
+			tieAlphaDescriptorStatus != IIF_CB_STATUS_OK || tieBetaDescriptorStatus != IIF_CB_STATUS_OK) {
 			++failures;
 			std::cerr << "FAIL: Provider descriptor status failure (WRF=" << wrfDescriptorStatus
 				<< ", CSF=" << csfDescriptorStatus << ", PAS=" << pasDescriptorStatus << ")\n";
@@ -332,6 +371,10 @@ namespace {
 		IIF_CB_RegistrationV3 wrfRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
 		IIF_CB_RegistrationV3 csfRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
 		IIF_CB_RegistrationV3 pasRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		IIF_CB_RegistrationV3 outgoingValidationRegistration{
+			sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		IIF_CB_RegistrationV3 tieAlphaRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		IIF_CB_RegistrationV3 tieBetaRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
 		IIF_CB_OutgoingProviderV3 wrongVersion = wrf;
 		wrongVersion.version = 77;
 		IIF_CB_RegistrationV3 invalidRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
@@ -365,6 +408,12 @@ namespace {
 			interfaceV3.register_outgoing(interfaceV3.registry, &csf, &csfRegistration);
 		const auto pasRegistrationStatus =
 			interfaceV3.register_incoming(interfaceV3.registry, &pas, &pasRegistration);
+		const auto outgoingValidationRegistrationStatus = interfaceV3.register_outgoing(interfaceV3.registry,
+			&outgoingValidation, &outgoingValidationRegistration);
+		const auto tieAlphaRegistrationStatus = interfaceV3.register_outgoing(interfaceV3.registry,
+			&tieAlpha, &tieAlphaRegistration);
+		const auto tieBetaRegistrationStatus = interfaceV3.register_outgoing(interfaceV3.registry,
+			&tieBeta, &tieBetaRegistration);
 		const bool registrationsValid = wrfRegistrationStatus == IIF_CB_STATUS_OK &&
 			wrfRegistration.status == IIF_CB_STATUS_OK && wrfRegistration.added == 1 &&
 			wrfRegistration.handle.value != 0 && csfRegistrationStatus == IIF_CB_STATUS_OK &&
@@ -372,8 +421,19 @@ namespace {
 			csfRegistration.handle.value != 0 && csfRegistration.handle.value != wrfRegistration.handle.value &&
 			pasRegistrationStatus == IIF_CB_STATUS_OK && pasRegistration.status == IIF_CB_STATUS_OK &&
 			pasRegistration.added == 1 && pasRegistration.handle.value != 0 &&
+			outgoingValidationRegistrationStatus == IIF_CB_STATUS_OK &&
+			outgoingValidationRegistration.status == IIF_CB_STATUS_OK &&
+			outgoingValidationRegistration.added == 1 && outgoingValidationRegistration.handle.value != 0 &&
+			tieAlphaRegistrationStatus == IIF_CB_STATUS_OK && tieAlphaRegistration.status == IIF_CB_STATUS_OK &&
+			tieAlphaRegistration.added == 1 && tieAlphaRegistration.handle.value != 0 &&
+			tieBetaRegistrationStatus == IIF_CB_STATUS_OK && tieBetaRegistration.status == IIF_CB_STATUS_OK &&
+			tieBetaRegistration.added == 1 && tieBetaRegistration.handle.value != 0 &&
 			pasRegistration.handle.value != wrfRegistration.handle.value &&
-			pasRegistration.handle.value != csfRegistration.handle.value;
+			pasRegistration.handle.value != csfRegistration.handle.value &&
+			outgoingValidationRegistration.handle.value != wrfRegistration.handle.value &&
+			outgoingValidationRegistration.handle.value != csfRegistration.handle.value &&
+			outgoingValidationRegistration.handle.value != pasRegistration.handle.value &&
+			tieAlphaRegistration.handle.value != tieBetaRegistration.handle.value;
 		if (!registrationsValid) {
 			++failures;
 			std::cerr << "FAIL: one or more Provider registrations returned an invalid status/handle; "
@@ -389,6 +449,40 @@ namespace {
 
 		auto outgoing = MakeOutgoing();
 		auto outgoingResult = MakeOutgoingResult();
+		const auto initialValidationCalls = getValidationCalls();
+		outgoing.evaluation_kind = IIF_CB_EVALUATION_PREDICTION_KIND;
+		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
+			outgoingResult.status == IIF_CB_DISPATCH_APPLIED && getValidationCalls() == initialValidationCalls,
+			"calculation-only evaluation mask excludes the real Provider DLL callback from Prediction");
+		outgoing = MakeOutgoing();
+		for (const auto mode : { ValidationBadStatus, ValidationBadSize, ValidationBadVersion,
+			ValidationBadMultiplier, ValidationBadComponentMask, ValidationBadMultiplierRange }) {
+			setValidationMode(mode);
+			outgoingResult = MakeOutgoingResult();
+			const auto callsBefore = getValidationCalls();
+			const auto dispatchStatus = interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult);
+			const auto expectedStatus = mode == ValidationBadSize || mode == ValidationBadVersion ?
+				IIF_CB_DISPATCH_PROVIDER_FAILURE : IIF_CB_DISPATCH_INVALID_PROVIDER_RESULT;
+			Check(dispatchStatus == IIF_CB_STATUS_OK &&
+				outgoingResult.status == expectedStatus &&
+				getValidationCalls() == callsBefore + 1 &&
+				Near(outgoingResult.damage.health_damage, 100.0f) &&
+				Near(outgoingResult.damage.physical_damage, 80.0f) &&
+				Near(outgoingResult.damage.total_damage, 180.0f),
+				"malformed cross-DLL callback state/size/version/multiplier/component mask fails closed with original numeric snapshot");
+		}
+		setValidationMode(ValidationApply);
+		outgoing = MakeOutgoing();
+		outgoing.damage.struct_size -= sizeof(std::uint32_t);
+		outgoingResult = MakeOutgoingResult();
+		const auto callsBeforeBadDamageSize = getValidationCalls();
+		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) ==
+			IIF_CB_STATUS_INVALID_STRUCT_SIZE && outgoingResult.status == IIF_CB_DISPATCH_INVALID_CONTEXT &&
+			getValidationCalls() == callsBeforeBadDamageSize &&
+			outgoingResult.damage.valid_mask == 0 && Near(outgoingResult.damage.health_damage, 0.0f),
+			"malformed nested DamageSnapshot is rejected before entering any Provider callback");
+		outgoing = MakeOutgoing();
+		setValidationMode(ValidationNoChange);
 		triggerShutdown();
 		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
 			outgoingResult.status == IIF_CB_DISPATCH_APPLIED &&
@@ -398,6 +492,8 @@ namespace {
 			"cross-DLL WRF/CSF independent multipliers compose on Health and Physical only");
 		Check(getOrder(0) == 100 && getOrder(1) == 200,
 			"priority invokes WRF 100 before CSF 200 across modules");
+		Check(getTieOrder(0) == 1 && getTieOrder(1) == 2,
+			"equal-priority Provider DLL callbacks use ascending provider ID ordering and see the original snapshot");
 		Check(getCallbackShutdownStatus() == IIF_CB_STATUS_WOULD_DEADLOCK,
 			"Provider callback cannot synchronously shut down its own in-flight Host call");
 		Check(Near(getObserved(1, 1), 100.0f) && Near(getObserved(2, 1), 100.0f) &&
@@ -407,9 +503,11 @@ namespace {
 		outgoing.evaluation_kind = IIF_CB_EVALUATION_UNKNOWN;
 		outgoingResult = MakeOutgoingResult();
 		const auto callsBeforeUnknown = getCounter(1) + getCounter(2);
+		const auto validationCallsBeforeUnknown = getValidationCalls();
 		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
 			outgoingResult.status == IIF_CB_DISPATCH_INVALID_CONTEXT &&
-			getCounter(1) + getCounter(2) == callsBeforeUnknown,
+			getCounter(1) + getCounter(2) == callsBeforeUnknown &&
+			getValidationCalls() == validationCallsBeforeUnknown,
 			"Unknown evaluation fails closed without callbacks");
 		outgoing = MakeOutgoing();
 		outgoing.evaluation_kind = IIF_CB_EVALUATION_PREDICTION_KIND;
@@ -428,6 +526,13 @@ namespace {
 		Check(interfaceV3.dispatch_incoming(interfaceV3.registry, &incoming, &incomingResult) == IIF_CB_STATUS_OK &&
 			incomingResult.status == IIF_CB_DISPATCH_APPLIED && Near(incomingResult.health_damage, 50.0f),
 			"PAS Provider DLL applies Incoming Health rule to simulated NPC power armor");
+		const auto pasCallsBeforeUnknownConfidence = getCounter(3);
+		incoming.confidence = IIF_CB_CONFIDENCE_UNKNOWN;
+		incomingResult = MakeIncomingResult();
+		Check(interfaceV3.dispatch_incoming(interfaceV3.registry, &incoming, &incomingResult) == IIF_CB_STATUS_OK &&
+			incomingResult.status == IIF_CB_DISPATCH_INVALID_CONTEXT &&
+			Near(incomingResult.health_damage, 100.0f) && getCounter(3) == pasCallsBeforeUnknownConfidence,
+			"Incoming UNKNOWN confidence fails closed before the real Provider DLL callback and preserves input damage");
 
 		IIF_CB_OutgoingProviderV3 invalid{};
 		invalid.struct_size = sizeof(invalid); invalid.version = IIF_CB_VERSION_3;
@@ -462,10 +567,12 @@ namespace {
 			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
 			return false;
 		}
+		const auto bridgeCountBeforeWaitFailure = getBridgeCount();
 		failNextWait();
 		const auto injectedWaitFailure = interfaceV3.wait_provider_quiescent(interfaceV3.registry,
 			invalidProviderRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
-		if (injectedWaitFailure != IIF_CB_STATUS_WAIT_FAILURE || GetModuleHandleW(providerPath) != providerModule) {
+		if (injectedWaitFailure != IIF_CB_STATUS_WAIT_FAILURE || GetModuleHandleW(providerPath) != providerModule ||
+			getBridgeCount() != bridgeCountBeforeWaitFailure) {
 			++failures;
 			std::cerr << "FAIL: injected wait did not produce the expected non-unload status\n";
 			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
@@ -479,6 +586,8 @@ namespace {
 			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
 			return false;
 		}
+		Check(getBridgeCount() + 1 == bridgeCountBeforeWaitFailure,
+			"failed Wait retains the Bridge and successful retry consumes it exactly once");
 
 		blockWRF();
 		std::atomic<std::uint32_t> activeDispatchStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
@@ -639,14 +748,114 @@ namespace {
 		const auto csfWaitStatus = csfUnregisterStatus == IIF_CB_STATUS_OK ?
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, csfRegistration.handle,
 				IIF_CB_STAGE_OUTGOING_CALCULATION) : IIF_CB_STATUS_INTERNAL_ERROR;
+		const auto tieAlphaUnregister = interfaceV3.unregister_provider(interfaceV3.registry,
+			tieAlphaRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		const auto tieAlphaWait = tieAlphaUnregister == IIF_CB_STATUS_OK ?
+			interfaceV3.wait_provider_quiescent(interfaceV3.registry, tieAlphaRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION) : IIF_CB_STATUS_INTERNAL_ERROR;
+		const auto tieBetaUnregister = interfaceV3.unregister_provider(interfaceV3.registry,
+			tieBetaRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		const auto tieBetaWait = tieBetaUnregister == IIF_CB_STATUS_OK ?
+			interfaceV3.wait_provider_quiescent(interfaceV3.registry, tieBetaRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION) : IIF_CB_STATUS_INTERNAL_ERROR;
 		if (pasWaitStatus != IIF_CB_STATUS_OK || callbackWaitUnregisterStatus != IIF_CB_STATUS_OK ||
 			callbackWaitStatus != IIF_CB_STATUS_OK || csfUnregisterStatus != IIF_CB_STATUS_OK ||
-			csfWaitStatus != IIF_CB_STATUS_OK) {
+			csfWaitStatus != IIF_CB_STATUS_OK || tieAlphaUnregister != IIF_CB_STATUS_OK ||
+			tieAlphaWait != IIF_CB_STATUS_OK || tieBetaUnregister != IIF_CB_STATUS_OK ||
+			tieBetaWait != IIF_CB_STATUS_OK) {
 			++failures;
 			std::cerr << "FAIL: Provider unregister/quiescence failed (PAS wait=" << pasWaitStatus
 				<< ", callback unregister/wait=" << callbackWaitUnregisterStatus << '/' << callbackWaitStatus
 				<< ", CSF unregister/wait=" << csfUnregisterStatus << '/' << csfWaitStatus
 				<< "); refusing FreeLibrary\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		setValidationMode(ValidationNoChange);
+		outgoing = MakeOutgoing();
+		outgoingResult = MakeOutgoingResult();
+		const auto outgoingNoChangeCalls = getValidationCalls();
+		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
+			outgoingResult.status == IIF_CB_DISPATCH_NO_CHANGE &&
+			getValidationCalls() == outgoingNoChangeCalls + 1 &&
+			Near(outgoingResult.damage.health_damage, 100.0f),
+			"Provider DLL callback executes with NO_CHANGE and dispatch reports NoChange when no Apply provider remains");
+		const auto outgoingValidationUnregister = interfaceV3.unregister_provider(interfaceV3.registry,
+			outgoingValidationRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		const auto outgoingValidationWait = outgoingValidationUnregister == IIF_CB_STATUS_OK ?
+			interfaceV3.wait_provider_quiescent(interfaceV3.registry, outgoingValidationRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION) : IIF_CB_STATUS_INTERNAL_ERROR;
+		if (outgoingValidationUnregister != IIF_CB_STATUS_OK || outgoingValidationWait != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: validation Outgoing Provider could not be retired safely; refusing FreeLibrary\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+
+		IIF_CB_IncomingProviderV3 incomingValidation{};
+		incomingValidation.struct_size = sizeof(incomingValidation);
+		incomingValidation.version = IIF_CB_VERSION_3;
+		if (getIncomingValidation(&incomingValidation) != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: Incoming validation descriptor could not be read\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		IIF_CB_RegistrationV3 incomingValidationRegistration{
+			sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		const auto incomingValidationRegistrationStatus = interfaceV3.register_incoming(interfaceV3.registry,
+			&incomingValidation, &incomingValidationRegistration);
+		if (incomingValidationRegistrationStatus != IIF_CB_STATUS_OK ||
+			incomingValidationRegistration.status != IIF_CB_STATUS_OK || !incomingValidationRegistration.added ||
+			incomingValidationRegistration.handle.value == 0) {
+			++failures;
+			std::cerr << "FAIL: Incoming validation Provider registration failed; refusing to use its handle\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		incoming = MakeIncoming(IIF_CB_ACTOR_NPC);
+		setValidationMode(ValidationApply);
+		incomingResult = MakeIncomingResult();
+		const auto incomingApplyCalls = getValidationCalls();
+		Check(interfaceV3.dispatch_incoming(interfaceV3.registry, &incoming, &incomingResult) == IIF_CB_STATUS_OK &&
+			incomingResult.status == IIF_CB_DISPATCH_APPLIED && Near(incomingResult.health_damage, 50.0f) &&
+			getValidationCalls() == incomingApplyCalls + 1,
+			"Incoming Provider DLL callback executes and its APPLY multiplier reaches the returned result");
+		for (const auto mode : { ValidationBadStatus, ValidationBadSize, ValidationBadVersion,
+			ValidationBadMultiplier, ValidationBadMultiplierRange }) {
+			setValidationMode(mode);
+			incomingResult = MakeIncomingResult();
+			const auto callsBefore = getValidationCalls();
+			const auto expectedStatus = mode == ValidationBadSize || mode == ValidationBadVersion ?
+				IIF_CB_DISPATCH_PROVIDER_FAILURE : IIF_CB_DISPATCH_INVALID_PROVIDER_RESULT;
+			Check(interfaceV3.dispatch_incoming(interfaceV3.registry, &incoming, &incomingResult) == IIF_CB_STATUS_OK &&
+				incomingResult.status == expectedStatus &&
+				Near(incomingResult.health_damage, 100.0f) && getValidationCalls() == callsBefore + 1,
+				"malformed Incoming Provider result fails closed without returning a partial damage value");
+		}
+		setValidationMode(ValidationNoChange);
+		incomingResult = MakeIncomingResult();
+		const auto incomingNoChangeCalls = getValidationCalls();
+		Check(interfaceV3.dispatch_incoming(interfaceV3.registry, &incoming, &incomingResult) == IIF_CB_STATUS_OK &&
+			incomingResult.status == IIF_CB_DISPATCH_NO_CHANGE &&
+			Near(incomingResult.health_damage, 100.0f) && getValidationCalls() == incomingNoChangeCalls + 1,
+			"Incoming Provider DLL callback executes with NO_CHANGE and preserves the original Health input");
+		incoming = MakeIncoming(IIF_CB_ACTOR_NPC);
+		incoming.struct_size -= sizeof(std::uint32_t);
+		incomingResult = MakeIncomingResult();
+		const auto incomingCallsBeforeBadSize = getValidationCalls();
+		Check(interfaceV3.dispatch_incoming(interfaceV3.registry, &incoming, &incomingResult) ==
+			IIF_CB_STATUS_INVALID_STRUCT_SIZE && incomingResult.status == IIF_CB_DISPATCH_INVALID_CONTEXT &&
+			incomingResult.health_damage == 0.0f && getValidationCalls() == incomingCallsBeforeBadSize,
+			"malformed Incoming context is rejected before callbacks and returns a zeroed fail-closed result");
+		const auto incomingValidationUnregister = interfaceV3.unregister_provider(interfaceV3.registry,
+			incomingValidationRegistration.handle, IIF_CB_STAGE_INCOMING_HEALTH);
+		const auto incomingValidationWait = incomingValidationUnregister == IIF_CB_STATUS_OK ?
+			interfaceV3.wait_provider_quiescent(interfaceV3.registry, incomingValidationRegistration.handle,
+				IIF_CB_STAGE_INCOMING_HEALTH) : IIF_CB_STATUS_INTERNAL_ERROR;
+		if (incomingValidationUnregister != IIF_CB_STATUS_OK || incomingValidationWait != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: validation Incoming Provider could not be retired safely; refusing FreeLibrary\n";
 			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
 			return false;
 		}
@@ -691,6 +900,13 @@ namespace {
 			ResolveRequired(providerModule, "TestProvider_GetCSF", getCSF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetPAS", getPAS, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetInvalid", getInvalid, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetOutgoingValidation", getOutgoingValidation, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetIncomingValidation", getIncomingValidation, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_SetValidationMode", setValidationMode, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetValidationCalls", getValidationCalls, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetTieAlpha", getTieAlpha, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetTieBeta", getTieBeta, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetTieOrder", getTieOrder, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
@@ -747,6 +963,18 @@ namespace {
 			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
 			return false;
 		}
+		Check(shutdownRegistration.handle.value != wrfRegistration.handle.value &&
+			interfaceV3.unregister_provider(interfaceV3.registry, wrfRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_NOT_FOUND &&
+			interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_NOT_FOUND,
+			"consumed stale Handle cannot unregister or grant unload permission for a reloaded Provider registration");
+		const auto reloadedCallbackCount = getCounter(1);
+		outgoing = MakeOutgoing();
+		outgoingResult = MakeOutgoingResult();
+		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
+			outgoingResult.status == IIF_CB_DISPATCH_APPLIED && getCounter(1) == reloadedCallbackCount + 1,
+			"fresh Provider instance still executes after stale Handle operations are rejected");
 		blockWRF();
 		std::thread shutdownCaller([&] {
 			auto context = MakeOutgoing();
