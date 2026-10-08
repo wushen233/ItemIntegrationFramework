@@ -75,20 +75,6 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 			RUNTIME_OUTPUT_DIRECTORY "${COMBATBUS_TEST_BINARY_DIR}"
 			LIBRARY_OUTPUT_DIRECTORY "${COMBATBUS_TEST_BINARY_DIR}")
 	endforeach()
-	if(DEFINED COMBATBUS_EXTERNAL_BINARY_DIR)
-		set_target_properties(combatbus_phase1o_fixtures PROPERTIES
-			RUNTIME_OUTPUT_DIRECTORY_RELEASE "${COMBATBUS_TEST_BINARY_DIR}")
-		# xmake stores Release outputs in its explicit lowercase release directory;
-		# keep the CTest manifest's target paths aligned without building via CMake.
-		foreach(target combatbus_iif_mock combatbus_production_contract combatbus_production_export_probe
-				combatbus_test_provider combatbus_test_provider_missing_export combatbus_cross_dll_host
-				combatbus_startup_probe)
-			set_target_properties(${target} PROPERTIES
-				RUNTIME_OUTPUT_DIRECTORY_RELEASE "${COMBATBUS_TEST_BINARY_DIR}"
-				LIBRARY_OUTPUT_DIRECTORY_RELEASE "${COMBATBUS_TEST_BINARY_DIR}")
-		endforeach()
-	endif()
-
 	add_test(NAME combatbus_cross_dll_abi_and_lifecycle
 		COMMAND combatbus_cross_dll_host
 			$<TARGET_FILE:combatbus_iif_mock>
