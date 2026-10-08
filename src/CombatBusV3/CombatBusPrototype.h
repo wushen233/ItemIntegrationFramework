@@ -12,11 +12,12 @@
 #include <iterator>
 #include <mutex>
 
-// Offline ABI candidate only. It models provider contracts and does not mirror
-// Fallout 4's HitData layout. Opaque engine handles are borrowed for one callback.
+// Internal Registry core shared by production IIF and its offline fixtures. It
+// models Provider contracts and does not mirror Fallout 4's HitData layout.
+// Opaque engine handles are borrowed only for one callback.
 namespace IIF::CombatBus::PrototypeV3 {
-	// Versioned research candidate only. The separate C ABI candidate and mock
-	// Windows DLL boundary have offline fixtures; neither is a production ABI.
+	// This internal C++ surface is not exported as the cross-DLL ABI. Providers
+	// use the separate versioned C interface in CombatBusCABI.h.
 	inline constexpr std::uint32_t kInterfaceVersion = 3;
 	inline constexpr std::uint32_t kMaxProviderIdLength = 127;
 	inline constexpr float kMaxDamageValue = 100000000.0f;
@@ -53,7 +54,9 @@ namespace IIF::CombatBus::PrototypeV3 {
 	enum class ShutdownStatus : Enum32 { Complete = 0, WouldDeadlock = 1, WaitFailure = 2 };
 	// InterfaceV3 unregister/wait routing values; Provider handles are Dispatcher-global.
 	enum class ProviderStage : Enum32 { OutgoingCalculation = 1, IncomingHealthProcessing = 2 };
+	#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 	enum class UnregisterFailurePoint : Enum32 { None = 0, SnapshotPreparation = 1, RetirementInsertion = 2, RetiredRecordAllocation = 3 };
+	#endif
 
 #if defined(_WIN32)
 #define IIF_COMBATBUS_CALL __cdecl
@@ -198,7 +201,9 @@ namespace IIF::CombatBus::PrototypeV3 {
 		// registries without allocating. The owner must stop/join callers before
 		// destroying this object; Shutdown does not make concurrent destruction safe.
 		ShutdownStatus Shutdown() noexcept;
+	#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 		bool IsAcceptingCallsForTesting() const noexcept;
+	#endif
 
 		RegistrationResult RegisterOutgoing(const OutgoingProviderV3* provider);
 		RegistrationResult RegisterIncoming(const IncomingHealthProviderV3* provider);
@@ -215,6 +220,7 @@ namespace IIF::CombatBus::PrototypeV3 {
 		std::unique_ptr<Impl> _impl;
 	};
 
+	#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 	namespace Testing {
 		// Deterministic failure injection for the offline Unregister fixtures only.
 		void FailNextUnregisterAt(UnregisterFailurePoint point) noexcept;
@@ -223,6 +229,7 @@ namespace IIF::CombatBus::PrototypeV3 {
 		void SetAfterQuiescenceClaimHook(QuiescenceClaimHook hook, void* context) noexcept;
 		void FailNextQuiescenceWait() noexcept;
 	}
+	#endif
 
 	// Explicit ABI layout checks; enum storage is fixed by enum class : uint32_t.
 	static_assert(sizeof(EvaluationKind) == 4);
@@ -234,7 +241,9 @@ namespace IIF::CombatBus::PrototypeV3 {
 	static_assert(sizeof(CallbackStatus) == 4);
 	static_assert(sizeof(RegistrationStatus) == 4);
 	static_assert(sizeof(ProviderStage) == 4);
+	#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 	static_assert(sizeof(UnregisterFailurePoint) == 4);
+	#endif
 	static_assert(static_cast<Enum32>(ProviderStage::OutgoingCalculation) == 1);
 	static_assert(static_cast<Enum32>(ProviderStage::IncomingHealthProcessing) == 2);
 #if defined(_WIN64)

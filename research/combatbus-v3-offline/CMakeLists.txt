@@ -8,10 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(combatbus_phase1o_fixtures
-	 src/CombatBusPrototype.cpp
+	 ../../src/CombatBusV3/CombatBusPrototype.cpp
 	 tests/CombatBusPrototypeTests.cpp)
 
-target_include_directories(combatbus_phase1o_fixtures PRIVATE include)
+target_include_directories(combatbus_phase1o_fixtures PRIVATE include ../../src/CombatBusV3)
+target_compile_definitions(combatbus_phase1o_fixtures PRIVATE IIF_COMBATBUS_OFFLINE_TESTING)
 set(COMBATBUS_TEST_BINARY_DIR "${CMAKE_BINARY_DIR}/bin")
 if(DEFINED COMBATBUS_EXTERNAL_BINARY_DIR)
 	set(COMBATBUS_TEST_BINARY_DIR "${COMBATBUS_EXTERNAL_BINARY_DIR}")
@@ -29,17 +30,26 @@ add_test(NAME combatbus_phase1o_fixtures COMMAND combatbus_phase1o_fixtures)
 
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 	add_library(combatbus_iif_mock SHARED
-		src/CombatBusPrototype.cpp
-		src/CombatBusCABI.cpp)
-	target_include_directories(combatbus_iif_mock PRIVATE include tests)
-	target_compile_definitions(combatbus_iif_mock PRIVATE IIF_CB_HOST_EXPORTS IIF_CB_TEST_HOOKS)
+		../../src/CombatBusV3/CombatBusPrototype.cpp
+		../../src/CombatBusV3/CombatBusCABI.cpp)
+	target_include_directories(combatbus_iif_mock PRIVATE include tests ../../src/CombatBusV3)
+	target_compile_definitions(combatbus_iif_mock PRIVATE IIF_CB_HOST_EXPORTS IIF_CB_TEST_HOOKS
+		IIF_CB_TEST_HOST_CONTROL IIF_COMBATBUS_OFFLINE_TESTING)
+	add_library(combatbus_production_contract SHARED
+		../../src/CombatBusV3/CombatBusPrototype.cpp
+		../../src/CombatBusV3/CombatBusCABI.cpp)
+	target_include_directories(combatbus_production_contract PRIVATE ../../src/CombatBusV3)
+	target_compile_definitions(combatbus_production_contract PRIVATE IIF_CB_HOST_EXPORTS IIF_CB_PRODUCTION_HOST)
+	add_executable(combatbus_production_export_probe tests/ProductionExportProbe.cpp)
+	target_include_directories(combatbus_production_export_probe PRIVATE ../../src/CombatBusV3)
 
 	add_library(combatbus_test_provider SHARED tests/MockProviderDll.cpp)
-	target_include_directories(combatbus_test_provider PRIVATE include)
+	target_include_directories(combatbus_test_provider PRIVATE include ../../src/CombatBusV3)
+	target_compile_definitions(combatbus_test_provider PRIVATE IIF_CB_TEST_HOST_CONTROL)
 	add_library(combatbus_test_provider_missing_export SHARED tests/MockProviderDll.cpp)
-	target_include_directories(combatbus_test_provider_missing_export PRIVATE include)
+	target_include_directories(combatbus_test_provider_missing_export PRIVATE include ../../src/CombatBusV3)
 	target_compile_definitions(combatbus_test_provider_missing_export PRIVATE
-		COMBATBUS_TEST_OMIT_CALLBACK_SHUTDOWN_STATUS)
+		COMBATBUS_TEST_OMIT_CALLBACK_SHUTDOWN_STATUS IIF_CB_TEST_HOST_CONTROL)
 	set_target_properties(combatbus_test_provider_missing_export PROPERTIES
 		OUTPUT_NAME "combatbus_test_provider_missing_export")
 
@@ -48,12 +58,14 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		tests/MockHostTestHooks.h
 		tests/CAbiHeaderSmoke.c
 		tests/StartupTrace.h)
-	target_include_directories(combatbus_cross_dll_host PRIVATE include)
+	target_include_directories(combatbus_cross_dll_host PRIVATE include ../../src/CombatBusV3)
+	target_compile_definitions(combatbus_cross_dll_host PRIVATE IIF_CB_TEST_HOST_CONTROL)
 	add_executable(combatbus_startup_probe tests/StartupProbe.cpp tests/StartupTrace.h)
 	target_include_directories(combatbus_startup_probe PRIVATE tests)
 
-	foreach(target combatbus_iif_mock combatbus_test_provider combatbus_test_provider_missing_export
-			combatbus_cross_dll_host combatbus_startup_probe)
+	foreach(target combatbus_iif_mock combatbus_production_contract combatbus_production_export_probe
+			combatbus_test_provider combatbus_test_provider_missing_export combatbus_cross_dll_host
+			combatbus_startup_probe)
 		if(MSVC)
 			target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
 		else()
@@ -63,7 +75,6 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 			RUNTIME_OUTPUT_DIRECTORY "${COMBATBUS_TEST_BINARY_DIR}"
 			LIBRARY_OUTPUT_DIRECTORY "${COMBATBUS_TEST_BINARY_DIR}")
 	endforeach()
-
 	add_test(NAME combatbus_cross_dll_abi_and_lifecycle
 		COMMAND combatbus_cross_dll_host
 			$<TARGET_FILE:combatbus_iif_mock>
@@ -93,6 +104,11 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 	set_tests_properties(combatbus_startup_probe PROPERTIES
 		DEPENDS combatbus_startup_probe_clear_trace
 		ENVIRONMENT "IIF_COMBATBUS_PHASE1V_MARKER=${probe_trace}")
+	add_test(NAME combatbus_production_interface_and_exports
+		COMMAND combatbus_production_export_probe $<TARGET_FILE:combatbus_production_contract>)
+	add_test(NAME combatbus_no_hook_structure
+		COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+			"${CMAKE_CURRENT_SOURCE_DIR}/tests/NoHookStructureCheck.ps1" "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 else()
 	message(STATUS "Windows x64 cross-DLL ABI targets are not supported by this build host")
 endif()

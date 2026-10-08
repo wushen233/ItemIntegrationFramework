@@ -31,6 +31,8 @@ namespace {
 	using CallbackShutdownStatusFn = std::uint32_t (IIF_CB_CALL *)();
 	using SetQuiescenceHookFn = void (IIF_CB_CALL *)(IIF_CB_TestQuiescenceClaimHook, void*);
 	using FailNextWaitFn = void (IIF_CB_CALL *)();
+	using FailNextRegistrationFn = void (IIF_CB_CALL *)();
+	using BridgeCountFn = std::uint32_t (IIF_CB_CALL *)();
 
 	struct WaitTargetState {
 		const IIF_CB_InterfaceV3* interfaceV3{};
@@ -291,11 +293,17 @@ namespace {
 				getCallbackShutdownStatus, missingProviderExport);
 		SetQuiescenceHookFn setQuiescenceHook{};
 		FailNextWaitFn failNextWait{};
+		FailNextRegistrationFn failNextRegistration{};
+		BridgeCountFn getBridgeCount{};
 		const bool hostTestHooksResolved =
 			ResolveRequired(hostModule, "IIF_CombatBus_Test_SetQuiescenceClaimHook",
 				setQuiescenceHook, missingHostExport) &&
 			ResolveRequired(hostModule, "IIF_CombatBus_Test_FailNextQuiescenceWait",
-				failNextWait, missingHostExport);
+				failNextWait, missingHostExport) &&
+			ResolveRequired(hostModule, "IIF_CombatBus_Test_FailNextRegistrationAfterBridgeLink",
+				failNextRegistration, missingHostExport) &&
+			ResolveRequired(hostModule, "IIF_CombatBus_Test_GetBridgeCount",
+				getBridgeCount, missingHostExport);
 		if (!initialProviderExportsResolved || !hostTestHooksResolved) {
 			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
 			return false;
@@ -327,6 +335,21 @@ namespace {
 		IIF_CB_OutgoingProviderV3 wrongVersion = wrf;
 		wrongVersion.version = 77;
 		IIF_CB_RegistrationV3 invalidRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		const auto bridgeCountBeforeFailure = getBridgeCount();
+		failNextRegistration();
+		const auto injectedRegistrationFailure = interfaceV3.register_outgoing(interfaceV3.registry,
+			&wrf, &invalidRegistration);
+		Check(injectedRegistrationFailure == IIF_CB_STATUS_ALLOCATION_FAILURE &&
+			invalidRegistration.status == IIF_CB_STATUS_ALLOCATION_FAILURE && invalidRegistration.added == 0 &&
+			getBridgeCount() == bridgeCountBeforeFailure,
+			"exception after Bridge linking rolls back Host ownership without leaving an unregistered Bridge");
+		failNextRegistration();
+		const auto injectedIncomingRegistrationFailure = interfaceV3.register_incoming(interfaceV3.registry,
+			&pas, &invalidRegistration);
+		Check(injectedIncomingRegistrationFailure == IIF_CB_STATUS_ALLOCATION_FAILURE &&
+			invalidRegistration.status == IIF_CB_STATUS_ALLOCATION_FAILURE && invalidRegistration.added == 0 &&
+			getBridgeCount() == bridgeCountBeforeFailure,
+			"incoming exception after Bridge linking also rolls back Host ownership");
 		Check(interfaceV3.register_outgoing(interfaceV3.registry, &wrongVersion, &invalidRegistration) ==
 			IIF_CB_STATUS_UNSUPPORTED_VERSION && invalidRegistration.status == IIF_CB_STATUS_UNSUPPORTED_VERSION &&
 			invalidRegistration.added == 0,
