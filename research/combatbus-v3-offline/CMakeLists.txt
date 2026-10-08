@@ -84,7 +84,8 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		COMMAND ${CMAKE_COMMAND} -E rm -f "${host_trace}")
 	set_tests_properties(combatbus_cross_dll_abi_and_lifecycle PROPERTIES
 		DEPENDS combatbus_cross_dll_clear_startup_trace
-		ENVIRONMENT "IIF_COMBATBUS_PHASE1V_MARKER=${host_trace}")
+		ENVIRONMENT "IIF_COMBATBUS_PHASE1V_MARKER=${host_trace}"
+		TIMEOUT 45)
 	add_test(NAME combatbus_cross_dll_missing_reload_export
 		COMMAND combatbus_cross_dll_host
 			$<TARGET_FILE:combatbus_iif_mock>
@@ -96,7 +97,8 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		COMMAND ${CMAKE_COMMAND} -E rm -f "${negative_trace}")
 	set_tests_properties(combatbus_cross_dll_missing_reload_export PROPERTIES
 		DEPENDS combatbus_cross_dll_missing_export_clear_startup_trace
-		ENVIRONMENT "IIF_COMBATBUS_PHASE1V_MARKER=${negative_trace}")
+		ENVIRONMENT "IIF_COMBATBUS_PHASE1V_MARKER=${negative_trace}"
+		TIMEOUT 45)
 	set(probe_trace "${CMAKE_BINARY_DIR}/startup-probe.trace")
 	add_test(NAME combatbus_startup_probe_clear_trace
 		COMMAND ${CMAKE_COMMAND} -E rm -f "${probe_trace}")

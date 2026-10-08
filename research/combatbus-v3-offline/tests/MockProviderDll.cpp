@@ -23,6 +23,7 @@ namespace {
 		float csfObservedPhysical{};
 		bool blockWrf{};
 		bool wrfEntered{};
+		bool wrfCallbackExitReached{};
 		bool releaseWrf{};
 		bool triggerShutdown{};
 		std::uint32_t callbackShutdownStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
@@ -61,7 +62,10 @@ namespace {
 		if (g_state.blockWrf) {
 			g_state.wrfEntered = true;
 			g_state.condition.notify_all();
-			g_state.condition.wait(lock, [] { return g_state.releaseWrf; });
+			if (!g_state.condition.wait_for(lock, std::chrono::seconds(20),
+				[] { return g_state.releaseWrf; })) {
+				return IIF_CB_CALLBACK_FAILURE;
+			}
 		}
 		const bool triggerShutdown = g_state.triggerShutdown;
 		g_state.triggerShutdown = false;
@@ -74,6 +78,10 @@ namespace {
 		result->status = IIF_CB_CALLBACK_APPLY;
 		result->component_mask = IIF_CB_COMPONENT_HEALTH | IIF_CB_COMPONENT_PHYSICAL;
 		result->multiplier = 0.5f;
+		{
+			std::scoped_lock exitLock{ g_state.mutex };
+			g_state.wrfCallbackExitReached = true;
+		}
 		return IIF_CB_CALLBACK_APPLY;
 	}
 
@@ -326,6 +334,7 @@ TEST_EXPORT void IIF_CB_CALL TestProvider_Reset(void)
 	g_state.csfObservedPhysical = 0.0f;
 	g_state.blockWrf = false;
 	g_state.wrfEntered = false;
+	g_state.wrfCallbackExitReached = false;
 	g_state.releaseWrf = false;
 	g_state.triggerShutdown = false;
 	g_state.callbackShutdownStatus = IIF_CB_STATUS_INTERNAL_ERROR;
@@ -341,6 +350,7 @@ TEST_EXPORT void IIF_CB_CALL TestProvider_BlockWRF(void)
 	std::scoped_lock lock{ g_state.mutex };
 	g_state.blockWrf = true;
 	g_state.wrfEntered = false;
+	g_state.wrfCallbackExitReached = false;
 	g_state.releaseWrf = false;
 }
 
@@ -349,6 +359,12 @@ TEST_EXPORT std::uint32_t IIF_CB_CALL TestProvider_WaitWRFEntered(std::uint32_t 
 	std::unique_lock lock{ g_state.mutex };
 	return g_state.condition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
 		[] { return g_state.wrfEntered; }) ? 1u : 0u;
+}
+
+TEST_EXPORT std::uint32_t IIF_CB_CALL TestProvider_WasWRFCallbackExitReached(void)
+{
+	std::scoped_lock lock{ g_state.mutex };
+	return g_state.wrfCallbackExitReached ? 1u : 0u;
 }
 
 TEST_EXPORT void IIF_CB_CALL TestProvider_ReleaseWRF(void)

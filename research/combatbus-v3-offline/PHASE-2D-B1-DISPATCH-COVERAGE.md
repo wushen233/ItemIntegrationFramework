@@ -32,7 +32,7 @@ game memory is used.
 | Invalid output and rollback | Bad callback status, result size/version, NaN/out-of-range multiplier, and unauthorized component mask are rejected; errors return the original numeric snapshot | `ProviderFailure` is expected when the C ABI bridge rejects malformed result headers; Registry-invalid values report `InvalidProviderResult` |
 | Invalid input fails closed | Nested Outgoing damage size and Incoming context size are rejected before callbacks; Unknown Incoming confidence preserves the numeric input and skips callbacks | C ABI validation only |
 | Callback blocked while Unregister proceeds | Provider DLL callback is held by a condition-variable barrier; Unregister removes it while the callback is in flight | Deterministic offline interleaving |
-| WaitQuiescent is a callback exit barrier | Claim hook/event holds the single waiter; Wait cannot report success before callback release; callback then exits and the owner receives success | No provider module release before success |
+| WaitQuiescent is a callback exit barrier | WRF remains blocked while the first waiter passes the post-claim hook; a bounded completion check confirms Wait has not returned; only then is WRF released, after which the designated waiter returns `OK` | No Provider module release before success; a premature return is explicitly recorded as failure |
 | No duplicate unload permission | Concurrent same-Handle waiter returns `WAIT_IN_PROGRESS`; post-consumption repeat returns `NOT_FOUND` | C ABI state mapping is exercised |
 | Failed Wait and Bridge ownership | Injected Wait failure leaves the C ABI Bridge count unchanged and does not release the Provider DLL; successful retry consumes one Bridge | Test-only failure control is not public ABI |
 | Callback-originated Wait | Cross-stage callback attempt is rejected as `WOULD_DEADLOCK`; external thread Wait succeeds after callback return | Covers the tested Dispatcher scope |
@@ -43,13 +43,18 @@ game memory is used.
 
 ## Callback/ownership ordering exercised
 
-The in-flight case uses explicit Provider-entered/release and quiescence-claim events. The test
-sequence is: dispatch enters Provider DLL callback; external caller successfully unregisters;
-first waiter claims retirement; competing waiter returns `WAIT_IN_PROGRESS`; the claim owner is
-still blocked; test releases the claim and callback; dispatch returns; only the claim owner returns
-`OK`; a subsequent call is `NOT_FOUND`; later Dispatch does not enter the removed callback; and
-only after all remaining handles are quiescent does the Host release the Provider DLL. The test
-does not rely on sleep alone to establish callback ordering.
+The in-flight case uses explicit Provider-entered, claim-entered, claim-release, hook-exiting, and
+wait-completed events, plus a Provider-side callback-exit marker immediately before callback return.
+Its order is: dispatch enters the Provider DLL callback and blocks;
+external Unregister succeeds; the first waiter claims retirement; a competing waiter returns
+`WAIT_IN_PROGRESS`; the claim hook is released and signals that it is exiting; while WRF remains
+blocked, the test performs a bounded wait-completion check and records any premature result,
+including an early `OK`; then WRF is released and dispatch exits; exactly the designated waiter
+returns `OK`; the stale Handle returns `NOT_FOUND`; and later Dispatch does not enter the removed
+callback. The designated waiter also verifies the Provider callback-exit marker before accepting
+`OK`. The hook and Provider callback have bounded waits, all failure paths release both gates
+before joining created threads, and CTest applies a 45-second per-process timeout to cross-DLL
+fixtures. The test does not use `TerminateThread` or rely on sleep alone for event ordering.
 
 Unregister allocation-failure injection and independent-Handle waiting are also retained in the
 single-process Registry fixtures. Phase 2D-A's separate runtime-smoke source remains no-Dispatch;

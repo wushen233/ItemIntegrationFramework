@@ -26,6 +26,7 @@ namespace {
 	using ResetFn = void (IIF_CB_CALL *)();
 	using BlockFn = void (IIF_CB_CALL *)();
 	using WaitEnteredFn = std::uint32_t (IIF_CB_CALL *)(std::uint32_t);
+	using CallbackExitReachedFn = std::uint32_t (IIF_CB_CALL *)();
 	using ReleaseFn = void (IIF_CB_CALL *)();
 	using CounterFn = std::uint32_t (IIF_CB_CALL *)(std::uint32_t);
 	using ObservedFn = float (IIF_CB_CALL *)(std::uint32_t, std::uint32_t);
@@ -59,13 +60,18 @@ namespace {
 	struct ClaimGate {
 		HANDLE entered{};
 		HANDLE release{};
+		HANDLE hookExiting{};
+		std::atomic<bool> timedOut{};
 	};
 
 	void IIF_CB_CALL PauseAfterClaim(void* opaque) noexcept
 	{
 		auto& gate = *static_cast<ClaimGate*>(opaque);
 		SetEvent(gate.entered);
-		(void)WaitForSingleObject(gate.release, INFINITE);
+		if (WaitForSingleObject(gate.release, 10000) != WAIT_OBJECT_0) {
+			gate.timedOut.store(true, std::memory_order_release);
+		}
+		SetEvent(gate.hookExiting);
 	}
 
 	std::uint32_t IIF_CB_CALL WaitForTargetFromProvider(void* opaque,
@@ -288,6 +294,7 @@ namespace {
 		ResetFn resetProvider{};
 		BlockFn blockWRF{};
 		WaitEnteredFn waitWRFEntered{};
+		CallbackExitReachedFn wrfCallbackExitReached{};
 		ReleaseFn releaseWRF{};
 		CounterFn getCounter{};
 		ObservedFn getObserved{};
@@ -311,6 +318,8 @@ namespace {
 			ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_WasWRFCallbackExitReached",
+				wrfCallbackExitReached, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetCounter", getCounter, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetObserved", getObserved, missingProviderExport) &&
@@ -619,16 +628,18 @@ namespace {
 		}
 		HANDLE claimEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE claimRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		HANDLE claimHookExiting = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE waitStarted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE waitFinished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE secondWaitStarted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE secondWaitFinished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-		if (!claimEntered || !claimRelease || !waitStarted || !waitFinished ||
+		if (!claimEntered || !claimRelease || !claimHookExiting || !waitStarted || !waitFinished ||
 			!secondWaitStarted || !secondWaitFinished) {
 			++failures;
 			std::cerr << "FAIL: could not create deterministic quiescence barrier events\n";
 			if (claimEntered) CloseHandle(claimEntered);
 			if (claimRelease) CloseHandle(claimRelease);
+			if (claimHookExiting) CloseHandle(claimHookExiting);
 			if (waitStarted) CloseHandle(waitStarted);
 			if (waitFinished) CloseHandle(waitFinished);
 			if (secondWaitStarted) CloseHandle(secondWaitStarted);
@@ -640,12 +651,23 @@ namespace {
 		}
 		std::atomic<std::uint32_t> waitStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
 		std::atomic<std::uint32_t> secondWaitStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
-		ClaimGate claimGate{ claimEntered, claimRelease };
+		std::atomic<bool> callbackReleased{ false };
+		std::atomic<bool> waitReturnedBeforeCallbackRelease{ false };
+		std::atomic<bool> earlyQuiescent{ false };
+		ClaimGate claimGate{ claimEntered, claimRelease, claimHookExiting };
 		setQuiescenceHook(&PauseAfterClaim, &claimGate);
 		std::thread waitThread([&] {
 			SetEvent(waitStarted);
-			waitStatus.store(interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
-				IIF_CB_STAGE_OUTGOING_CALCULATION), std::memory_order_release);
+			const auto status = interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION);
+			waitStatus.store(status, std::memory_order_release);
+			const bool providerCallbackExitReached = wrfCallbackExitReached() != 0;
+			if (!callbackReleased.load(std::memory_order_acquire)) {
+				waitReturnedBeforeCallbackRelease.store(true, std::memory_order_release);
+			}
+			if (status == IIF_CB_STATUS_OK && !providerCallbackExitReached) {
+				earlyQuiescent.store(true, std::memory_order_release);
+			}
 			SetEvent(waitFinished);
 		});
 		Check(WaitForSingleObject(waitStarted, 5000) == WAIT_OBJECT_0,
@@ -663,22 +685,42 @@ namespace {
 		Check(WaitForSingleObject(secondWaitFinished, 2000) == WAIT_OBJECT_0 &&
 			secondWaitStatus.load(std::memory_order_acquire) == IIF_CB_STATUS_WAIT_IN_PROGRESS,
 			"second DLL caller is denied duplicate unload authorization while first owns the claim");
-		Check(WaitForSingleObject(waitFinished, 100) == WAIT_TIMEOUT,
-			"claim owner cannot finish while the Provider callback is still running");
 		Check(getCounter(1) >= 3, "active callback remains accounted before quiescence");
 		setQuiescenceHook(nullptr, nullptr);
 		SetEvent(claimRelease);
+		const bool hookExited = WaitForSingleObject(claimHookExiting, 5000) == WAIT_OBJECT_0;
+		Check(hookExited && !claimGate.timedOut.load(std::memory_order_acquire),
+			"first waiter acknowledges that the post-claim test barrier has been released and the hook is exiting");
+		const DWORD waitBeforeCallbackRelease = WaitForSingleObject(waitFinished, 500);
+		const bool returnedBeforeCallbackRelease = waitBeforeCallbackRelease == WAIT_OBJECT_0 ||
+			waitReturnedBeforeCallbackRelease.load(std::memory_order_acquire);
+		if (returnedBeforeCallbackRelease) {
+			Check(!earlyQuiescent.load(std::memory_order_acquire),
+				"WaitQuiescent did not grant early unload permission while WRF callback remained blocked");
+			Check(false, "designated WaitQuiescent remains incomplete after passing the claim hook while callback is in flight");
+		} else {
+			Check(waitBeforeCallbackRelease == WAIT_TIMEOUT,
+				"WaitQuiescent remains blocked after the waiter passed the claim hook while WRF callback is still in flight");
+		}
+		callbackReleased.store(true, std::memory_order_release);
 		releaseWRF();
 		callbackThread.join();
 		waitThread.join();
 		secondWaitThread.join();
+		Check(activeDispatchStatus.load(std::memory_order_acquire) == IIF_CB_DISPATCH_APPLIED,
+			"bounded WRF callback barrier was explicitly released before its timeout");
 		CloseHandle(claimEntered);
 		CloseHandle(claimRelease);
+		CloseHandle(claimHookExiting);
 		CloseHandle(waitStarted);
 		CloseHandle(waitFinished);
 		CloseHandle(secondWaitStarted);
 		CloseHandle(secondWaitFinished);
-		if (waitStatus.load(std::memory_order_acquire) != IIF_CB_STATUS_OK ||
+		if (claimGate.timedOut.load(std::memory_order_acquire) ||
+			earlyQuiescent.load(std::memory_order_acquire) ||
+			waitReturnedBeforeCallbackRelease.load(std::memory_order_acquire) ||
+			waitStatus.load(std::memory_order_acquire) != IIF_CB_STATUS_OK ||
+			wrfCallbackExitReached() == 0 ||
 			secondWaitStatus.load(std::memory_order_acquire) != IIF_CB_STATUS_WAIT_IN_PROGRESS) {
 			++failures;
 			std::cerr << "FAIL: WRF quiescence did not produce exactly one successful unload authorization\n";
@@ -909,6 +951,8 @@ namespace {
 			ResolveRequired(providerModule, "TestProvider_GetTieOrder", getTieOrder, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_WasWRFCallbackExitReached",
+				wrfCallbackExitReached, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
 			ResolveRequired(providerModule, "TestProvider_GetCounter", getCounter, missingProviderExport) &&
