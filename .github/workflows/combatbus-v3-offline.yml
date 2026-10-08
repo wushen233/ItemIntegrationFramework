@@ -6,12 +6,17 @@ on:
     paths:
       - '.github/workflows/combatbus-v3-offline.yml'
       - 'research/combatbus-v3-offline/**'
+  push:
+    branches: [review/combatbus-v3-offline-phase1q]
+    paths:
+      - '.github/workflows/combatbus-v3-offline.yml'
+      - 'research/combatbus-v3-offline/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: combatbus-v3-offline-${{ github.event.pull_request.number }}
+  group: combatbus-v3-offline-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,7 +29,7 @@ jobs:
       matrix:
         toolchain: [msvc, clangcl]
     env:
-      BUILD_DIR: ${{ runner.temp }}\combatbus-v3-${{ matrix.toolchain }}
+      BUILD_DIR: ${{ github.workspace }}\_ci\combatbus-v3-${{ matrix.toolchain }}
       CONFIGURATION: Release
     steps:
       - name: Checkout
