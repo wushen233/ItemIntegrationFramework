@@ -4,6 +4,7 @@
 #include "CombatBusCABI.h"
 
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 
 namespace {
@@ -22,7 +23,14 @@ int wmain(int argc, wchar_t** argv)
 	HMODULE module = LoadLibraryW(argv[1]);
 	if (!module) return Fail("LoadLibraryW failed");
 
-	auto query = reinterpret_cast<QueryFn>(GetProcAddress(module, "IIF_CombatBus_QueryInterface"));
+	const FARPROC queryExport = GetProcAddress(module, "IIF_CombatBus_QueryInterface");
+	if (!queryExport) {
+		FreeLibrary(module);
+		return Fail("required QueryInterface export missing");
+	}
+	static_assert(sizeof(QueryFn) == sizeof(FARPROC));
+	QueryFn query{};
+	std::memcpy(&query, &queryExport, sizeof(query));
 	if (!query) return Fail("required QueryInterface export missing");
 	if (GetProcAddress(module, "IIF_CombatBus_Shutdown")) {
 		return Fail("production DLL exposes Provider-accessible Host Shutdown");
