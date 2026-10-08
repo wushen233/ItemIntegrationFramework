@@ -1,0 +1,37 @@
+set_project("CombatBusPhase1VOffline")
+set_version("1.0.0")
+set_languages("c11", "cxx20")
+set_warnings("allextra", "error")
+
+target("combatbus_phase1o_fixtures")
+    set_kind("binary")
+    add_files("src/CombatBusPrototype.cpp", "tests/CombatBusPrototypeTests.cpp")
+    add_includedirs("include")
+
+target("combatbus_iif_mock")
+    set_kind("shared")
+    add_files("src/CombatBusPrototype.cpp", "src/CombatBusCABI.cpp")
+    add_includedirs("include", "tests")
+    add_defines("IIF_CB_HOST_EXPORTS", "IIF_CB_TEST_HOOKS")
+
+target("combatbus_test_provider")
+    set_kind("shared")
+    add_files("tests/MockProviderDll.cpp")
+    add_includedirs("include")
+
+target("combatbus_test_provider_missing_export")
+    set_kind("shared")
+    set_basename("combatbus_test_provider_missing_export")
+    add_files("tests/MockProviderDll.cpp")
+    add_includedirs("include")
+    add_defines("COMBATBUS_TEST_OMIT_CALLBACK_SHUTDOWN_STATUS")
+
+target("combatbus_cross_dll_host")
+    set_kind("binary")
+    add_files("tests/CrossDllHost.cpp", "tests/CAbiHeaderSmoke.c")
+    add_includedirs("include", "tests")
+
+target("combatbus_startup_probe")
+    set_kind("binary")
+    add_files("tests/StartupProbe.cpp")
+    add_includedirs("tests")
