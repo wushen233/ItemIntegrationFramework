@@ -1,0 +1,137 @@
+name: CombatBus V3 Offline Windows
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/combatbus-v3-offline.yml'
+      - 'research/combatbus-v3-offline/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: combatbus-v3-offline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Windows x64 / ${{ matrix.toolchain }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [msvc, clangcl]
+    env:
+      BUILD_DIR: ${{ runner.temp }}\combatbus-v3-${{ matrix.toolchain }}
+      CONFIGURATION: Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Report toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version
+          ctest --version
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe not found' }
+          $vs = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1).Trim()
+          if (-not $vs) { throw 'Visual Studio 2022 installation not found' }
+          $devCmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $devCmd)) { throw 'VsDevCmd.bat not found' }
+          $pathCommand = 'call "' + $devCmd + '" -no_logo -arch=x64 && where.exe cl.exe && where.exe link.exe'
+          $toolPaths = & cmd.exe /d /s /c $pathCommand
+          if ($LASTEXITCODE -ne 0) { throw "MSVC tool discovery failed: $LASTEXITCODE" }
+          $clPath = ($toolPaths | Where-Object { $_ -match '(?i)\\cl\.exe$' } | Select-Object -First 1).Trim()
+          $linkPath = ($toolPaths | Where-Object { $_ -match '(?i)\\link\.exe$' } | Select-Object -First 1).Trim()
+          if (-not $clPath -or -not $linkPath) { throw 'MSVC compiler or linker was not found in the x64 developer environment' }
+          Write-Host "MSVC compiler file version: $((Get-Item -LiteralPath $clPath).VersionInfo.FileVersion)"
+          Write-Host "MSVC linker file version: $((Get-Item -LiteralPath $linkPath).VersionInfo.FileVersion)"
+          if ('${{ matrix.toolchain }}' -eq 'clangcl') {
+            $clang = Join-Path $vs 'VC\Tools\Llvm\bin\clang-cl.exe'
+            if (-not (Test-Path -LiteralPath $clang)) { throw 'Visual Studio Clang-cl toolset is unavailable' }
+            & $clang --version
+            if ($LASTEXITCODE -ne 0) { throw "clang-cl version query failed: $LASTEXITCODE" }
+          }
+
+      - name: Configure MSVC
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: cmake -S research/combatbus-v3-offline -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64
+
+      - name: Configure Clang-cl
+        if: matrix.toolchain == 'clangcl'
+        shell: pwsh
+        run: cmake -S research/combatbus-v3-offline -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 -T ClangCL
+
+      - name: Verify selected C and C++ compiler
+        shell: pwsh
+        run: |
+          $cache = Get-Content -Raw (Join-Path $env:BUILD_DIR 'CMakeCache.txt')
+          foreach ($language in @('C', 'CXX')) {
+            $pattern = '(?m)^CMAKE_' + $language + '_COMPILER(?::[^=]+)?=(.+)$'
+            $match = [regex]::Match($cache, $pattern)
+            if (-not $match.Success) { throw "CMake did not record its $language compiler" }
+            $compiler = $match.Groups[1].Value
+            Write-Host "CMake $language compiler: $compiler"
+            if ('${{ matrix.toolchain }}' -eq 'clangcl' -and $compiler -notmatch '(?i)clang-cl') {
+              throw "Clang-cl job selected a different $language compiler: $compiler"
+            }
+            if ('${{ matrix.toolchain }}' -eq 'msvc' -and $compiler -match '(?i)clang-cl') {
+              throw "MSVC job selected Clang-cl for $language`: $compiler"
+            }
+          }
+
+      - name: Build all ABI and lifecycle targets
+        shell: pwsh
+        run: cmake --build "$env:BUILD_DIR" --config "$env:CONFIGURATION" --parallel 2
+
+      - name: Run complete CTest suite
+        shell: pwsh
+        run: ctest --test-dir "$env:BUILD_DIR" -C "$env:CONFIGURATION" --output-on-failure --verbose --parallel 1 --output-junit "$env:BUILD_DIR\ctest-results.xml"
+
+      - name: Verify traces and report artifact hashes
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:BUILD_DIR 'bin\Release'
+          $required = @(
+            'combatbus_phase1o_fixtures.exe',
+            'combatbus_cross_dll_host.exe',
+            'combatbus_startup_probe.exe',
+            'combatbus_iif_mock.dll',
+            'combatbus_test_provider.dll',
+            'combatbus_test_provider_missing_export.dll'
+          )
+          foreach ($name in $required) {
+            $path = Join-Path $bin $name
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing expected test artifact: $name" }
+          }
+          $probe = Get-Content -Raw (Join-Path $env:BUILD_DIR 'startup-probe.trace')
+          foreach ($marker in @('probe.wmain.entered', 'probe.before_return')) {
+            if (-not $probe.Contains($marker)) { throw "Startup probe marker missing: $marker" }
+          }
+          $hostTrace = Get-Content -Raw (Join-Path $env:BUILD_DIR 'cross-dll-startup.trace')
+          $hostMarkers = @(
+            'host.wmain.entered', 'host.before_host_dll_load', 'host.host_dll_loaded',
+            'host.before_provider_dll_load', 'host.provider_dll_loaded', 'host.before_provider_reload',
+            'host.provider_reloaded', 'host.shutdown_drained', 'host.modules_unloaded',
+            'host.test_finished', 'host.before_normal_exit'
+          )
+          $previous = -1
+          foreach ($marker in $hostMarkers) {
+            $position = $hostTrace.IndexOf($marker)
+            if ($position -le $previous) { throw "Host startup/lifecycle marker missing or out of order: $marker" }
+            $previous = $position
+          }
+          $junit = [xml](Get-Content -Raw (Join-Path $env:BUILD_DIR 'ctest-results.xml'))
+          if ([int]$junit.testsuite.failures -ne 0 -or [int]$junit.testsuite.tests -lt 7) {
+            throw 'CTest JUnit summary reports a failure or fewer than seven tests'
+          }
+          Write-Host "CTest: $($junit.testsuite.tests) tests; $($junit.testsuite.failures) failures"
+          Get-ChildItem -LiteralPath $bin -File | Where-Object { $_.Extension -in @('.exe', '.dll') } |
+            Sort-Object Name | ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+              Write-Host "$($_.Name) SHA256 $hash"
+            }

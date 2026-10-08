@@ -66,7 +66,7 @@ The callback contract forbids C++ exceptions from escaping a Provider callback. 
 
 ## Build and run
 
-This research tree uses xmake.lua as its build definition. Keep temporary build output under the workspace scratch tree; do not use the system drive TEMP directory. In the isolated Phase 1V run, the clone and xmake outputs were under E:\FO4ModWorkspace\scratch\iif-combatbus-phase1v-review\research\combatbus-v3-offline\build-phase1v\. CMakeLists.txt is retained only as a CTest runner/manifest when COMBATBUS_EXTERNAL_BINARY_DIR points at already-built xmake artifacts; no CMake build was used for the Phase 1V matrix.
+This research tree uses xmake.lua as its build definition. Keep temporary build output under the workspace scratch tree; do not use the system drive TEMP directory. In the isolated Phase 1V run, clone and xmake outputs were contained in a dedicated directory beneath workspace scratch. CMakeLists.txt is retained only as a CTest runner/manifest when COMBATBUS_EXTERNAL_BINARY_DIR points at already-built xmake artifacts; no CMake build was used for the Phase 1V matrix.
 
 Windows x64 targets include the single-process fixture, simulated Host DLL, full and missing-export Provider DLLs, dynamic-loading Host, and startup-only probe. Results are local offline evidence, not GitHub CI or game-runtime validation.
 ## Phase 1S quiescence ownership
@@ -87,4 +87,4 @@ Phase 1T remains offline-only. The public ABI candidate is not frozen; there is 
 
 CLANGCL-CRASH-INVESTIGATION.md records the bounded startup review and current test evidence. The historical dump still lacks a reliable call stack and remains UNKNOWN. Current startup probes establish only which markers were reached in these new runs. Both compiler families reached wmain and normal return; the full Host fixture reached the expected Host/Provider loads, reload, Shutdown drain, unload, and normal exit.
 
-WINDOWS-CI-PLAN.md proposes an MSVC/Clang-cl Windows matrix. No GitHub workflow is installed by this research change. Build outputs, CTest logs, and marker files were kept under workspace scratch and are removed after testing; no binaries are committed.
+WINDOWS-CI-PLAN.md describes the MSVC/Clang-cl Windows GitHub Actions matrix installed for this offline prototype. Build outputs, CTest logs, and marker files were kept under workspace scratch and are removed after testing; no binaries are committed.

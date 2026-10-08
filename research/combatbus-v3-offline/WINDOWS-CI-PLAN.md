@@ -1,22 +1,11 @@
-# Proposed Windows CI for CombatBus V3 Offline Prototype
+# Windows GitHub Actions CI for the CombatBus V3 Offline Prototype
 
-Status: proposal only. No workflow has been added and no GitHub CI result is claimed.
+The active workflow is .github/workflows/combatbus-v3-offline.yml. It runs on pull requests to main only when this workflow or research/combatbus-v3-offline changes. The workflow has read-only contents permission, a pinned actions/checkout v4.2.2 commit, independent MSVC and Clang-cl jobs, and no binary artifact upload.
 
-## Scope and matrix
+Each Windows Server 2022 job uses the existing CMake project and builds the full x64 Release target set before running the complete CTest suite serially. The C source ABI smoke test and C++20 fixtures compile in both jobs. CTest covers the single-process fixture, Host/IIF mock/Provider lifecycle, controlled missing-export rejection, and startup probe. The verification step checks the expected marker progression, JUnit's seven tests with zero failures, and prints SHA-256 for each EXE/DLL. Native command failures propagate as job failures; the matrix uses fail-fast false only so one failed compiler job does not cancel evidence from the other.
 
-Run only research/combatbus-v3-offline on windows-latest. Do not build an F4SE plugin, access Fallout 4 binaries, install hooks, or publish game artifacts.
+The workflow records CMake/CTest, MSVC, linker, and Clang-cl versions in Actions logs. It does not upload EXE, DLL, PDB, minidump, event-log, build-cache, or game files. No user-specific build or source path is embedded in the workflow. GitHub's public Actions logs are the evidence; retention artifacts are not used.
 
-| Job | Toolchain | Required checks |
-|---|---|---|
-| msvc-release | Visual Studio x64 MSVC | C11/C++20 ABI layout, single-process fixtures, cross-DLL Host/Provider lifecycle, missing-export negative case, startup probe |
-| clangcl-release | Visual Studio developer environment plus Clang-cl x64 | Same checks, with separate output paths |
+This CI validates only the offline ABI and mock lifecycle on the two runner toolchains. It does not prove Fallout 4 native callsite semantics, production hook safety, runtime threading, or game behavior. Historical Phase 1T Clang-cl access violation remains UNKNOWN / NOT REPRODUCED. Production ABI is not frozen and Production Hook remains NOT APPROVED.
 
-Each job uses an independent build and test directory. Build every executable and DLL before CTest. Run CTest serially with output-on-failure. Print compiler versions and SHA-256 for the Host executable, mock Host DLL, both Provider DLLs, fixture executable, and startup probe. The shared header layout assertions are compiled from both C11 and C++20 translation units. Cross-DLL tests use absolute paths and verify loaded module paths.
-
-## Failure evidence
-
-On failure, retain CTest output and exit code, compiler version/configuration, the artifact hash manifest, and startup marker text. Keep failing EXE/DLL artifacts as a private, short-lived workflow artifact, for example seven days. Do not upload minidumps, PDBs, local event logs, user paths, Fallout 4 binaries, or unrestricted build trees. Preserve a failing binary set even if a later run passes.
-
-## Limits and approval
-
-CI can validate the candidate ABI and mock lifecycle on the tested Windows toolchains. It cannot prove Fallout 4 native call-site semantics, hook safety, game-thread behavior, or WRF/CSF/PAS behavior. Creating a workflow under .github/workflows requires separate authorization and is outside Phase 1V.
+The workflow uses the Visual Studio 2022 CMake generator. Its Clang-cl job requires the Visual Studio LLVM/Clang toolset available on the Windows 2022 hosted image. The workflow checks compiler selection from CMakeCache and fails if the Clang-cl job accidentally configures another compiler.
