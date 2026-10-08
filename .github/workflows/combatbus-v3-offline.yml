@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/combatbus-v3-offline.yml'
       - 'research/combatbus-v3-offline/**'
+      - 'research/combatbus-v3-runtime-smoke/**'
 
 permissions:
   contents: read
