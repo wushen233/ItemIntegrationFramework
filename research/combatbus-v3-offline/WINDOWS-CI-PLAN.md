@@ -9,4 +9,3 @@ The workflow records CMake/CTest, MSVC, linker, and Clang-cl versions in Actions
 This CI validates only the offline ABI and mock lifecycle on the two runner toolchains. It does not prove Fallout 4 native callsite semantics, production hook safety, runtime threading, or game behavior. Historical Phase 1T Clang-cl access violation remains UNKNOWN / NOT REPRODUCED. Production ABI is not frozen and Production Hook remains NOT APPROVED.
 
 The workflow uses the Visual Studio 2022 CMake generator. Its Clang-cl job requires the Visual Studio LLVM/Clang toolset available on the Windows 2022 hosted image. The workflow checks compiler selection from CMakeCache and fails if the Clang-cl job accidentally configures another compiler.
-
