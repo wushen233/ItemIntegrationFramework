@@ -1,5 +1,6 @@
 #include "CombatBusCABI.h"
 #include "MockHostTestHooks.h"
+#include "StartupTrace.h"
 
 #include <windows.h>
 
@@ -159,14 +160,54 @@ namespace {
 			expectedLength < MAX_PATH && _wcsicmp(actualPath, fullExpectedPath) == 0;
 	}
 
+	bool InterfaceTableReady(const IIF_CB_InterfaceV3& table)
+	{
+		return table.struct_size == sizeof(table) && table.version == IIF_CB_VERSION_3 && table.registry &&
+			table.register_outgoing && table.register_incoming && table.unregister_provider &&
+			table.wait_provider_quiescent && table.dispatch_outgoing && table.dispatch_incoming;
+	}
+
+	bool ShutdownAndUnload(HMODULE hostModule, ShutdownFn shutdown, HMODULE providerModule)
+	{
+		if (!shutdown) {
+			std::cerr << "ERROR: cannot drain Host because Shutdown export is unavailable; keeping modules loaded\n";
+			return false;
+		}
+		const auto status = shutdown();
+		if (status != IIF_CB_STATUS_OK) {
+			std::cerr << "ERROR: Host Shutdown failed with status " << status
+				<< "; keeping modules loaded to avoid unsafe unload\n";
+			return false;
+		}
+		bool unloaded = true;
+		if (providerModule && !FreeLibrary(providerModule)) {
+			std::cerr << "ERROR: FreeLibrary failed for Provider after successful Host Shutdown\n";
+			unloaded = false;
+		}
+		if (hostModule && !FreeLibrary(hostModule)) {
+			std::cerr << "ERROR: FreeLibrary failed for Host after successful Shutdown\n";
+			unloaded = false;
+		}
+		return unloaded;
+	}
+
 	bool Run(const wchar_t* hostPath, const wchar_t* providerPath,
 		const wchar_t* reloadProviderPath = nullptr, const wchar_t* expectedMissingReloadExport = nullptr)
 	{
 		Check(CAbiHeaderSmoke() == 1, "C compiler accepted the shared public ABI header and Win64 layout assertions");
+		Check(combatbus_test::WriteStartupMarker("host.before_host_dll_load"),
+			"startup marker records immediately before Host DLL load");
 		HMODULE hostModule = LoadLibraryW(hostPath);
 		Check(hostModule != nullptr, "LoadLibrary loaded the simulated IIF Host DLL");
 		if (!hostModule) return false;
-		Check(ModulePathMatches(hostModule, hostPath), "Host HMODULE resolves to the requested absolute DLL path");
+		Check(combatbus_test::WriteStartupMarker("host.host_dll_loaded"),
+			"startup marker records Host DLL load completion");
+		if (!ModulePathMatches(hostModule, hostPath)) {
+			++failures;
+			std::cerr << "FAIL: Host HMODULE does not resolve to the requested absolute DLL path\n";
+			FreeLibrary(hostModule);
+			return false;
+		}
 		QueryFn query{};
 		ShutdownFn shutdown{};
 		const char* missingHostExport{};
@@ -191,20 +232,32 @@ namespace {
 		interfaceV3 = {};
 		interfaceV3.struct_size = sizeof(interfaceV3);
 		interfaceV3.version = IIF_CB_VERSION_3;
-		Check(query(IIF_CB_VERSION_3, sizeof(interfaceV3), &interfaceV3) == IIF_CB_STATUS_OK &&
-			interfaceV3.version == IIF_CB_VERSION_3 && interfaceV3.registry && interfaceV3.register_outgoing &&
-			interfaceV3.dispatch_incoming,
-			"supported V3 negotiation copies a complete Host-owned function table");
+		const auto queryStatus = query(IIF_CB_VERSION_3, sizeof(interfaceV3), &interfaceV3);
+		if (queryStatus != IIF_CB_STATUS_OK || !InterfaceTableReady(interfaceV3)) {
+			++failures;
+			std::cerr << "FAIL: QueryInterface did not return a complete V3 function table; status="
+				<< queryStatus << '\n';
+			(void)ShutdownAndUnload(hostModule, shutdown, nullptr);
+			return false;
+		}
+		Check(true, "supported V3 negotiation copies a complete Host-owned function table");
 
+		Check(combatbus_test::WriteStartupMarker("host.before_provider_dll_load"),
+			"startup marker records immediately before initial Provider DLL load");
 		HMODULE providerModule = LoadLibraryW(providerPath);
 		Check(providerModule != nullptr, "LoadLibrary loaded an independent Provider DLL");
 		if (!providerModule) {
-			(void)shutdown();
-			FreeLibrary(hostModule);
+			(void)ShutdownAndUnload(hostModule, shutdown, nullptr);
 			return false;
 		}
-		Check(ModulePathMatches(providerModule, providerPath),
-			"initial Provider HMODULE resolves to the requested absolute DLL path");
+		Check(combatbus_test::WriteStartupMarker("host.provider_dll_loaded"),
+			"startup marker records initial Provider DLL load completion");
+		if (!ModulePathMatches(providerModule, providerPath)) {
+			++failures;
+			std::cerr << "FAIL: initial Provider HMODULE does not resolve to the requested absolute DLL path\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		GetOutgoingFn getWRF{};
 		GetOutgoingFn getCSF{};
 		GetIncomingFn getPAS{};
@@ -244,9 +297,7 @@ namespace {
 			ResolveRequired(hostModule, "IIF_CombatBus_Test_FailNextQuiescenceWait",
 				failNextWait, missingHostExport);
 		if (!initialProviderExportsResolved || !hostTestHooksResolved) {
-			(void)shutdown();
-			FreeLibrary(providerModule);
-			FreeLibrary(hostModule);
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
 			return false;
 		}
 		resetProvider();
@@ -258,8 +309,17 @@ namespace {
 		csf.struct_size = sizeof(csf); csf.version = IIF_CB_VERSION_3;
 		IIF_CB_IncomingProviderV3 pas{};
 		pas.struct_size = sizeof(pas); pas.version = IIF_CB_VERSION_3;
-		Check(getWRF(&wrf) == IIF_CB_STATUS_OK && getCSF(&csf) == IIF_CB_STATUS_OK &&
-			getPAS(&pas) == IIF_CB_STATUS_OK, "Provider DLL fills versioned C provider descriptors");
+		const auto wrfDescriptorStatus = getWRF(&wrf);
+		const auto csfDescriptorStatus = getCSF(&csf);
+		const auto pasDescriptorStatus = getPAS(&pas);
+		if (wrfDescriptorStatus != IIF_CB_STATUS_OK || csfDescriptorStatus != IIF_CB_STATUS_OK ||
+			pasDescriptorStatus != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: Provider descriptor status failure (WRF=" << wrfDescriptorStatus
+				<< ", CSF=" << csfDescriptorStatus << ", PAS=" << pasDescriptorStatus << ")\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 
 		IIF_CB_RegistrationV3 wrfRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
 		IIF_CB_RegistrationV3 csfRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
@@ -276,16 +336,28 @@ namespace {
 			IIF_CB_STATUS_INVALID_STRUCT_SIZE,
 			"registration output with wrong size fails closed");
 		wrfRegistration.struct_size = sizeof(wrfRegistration);
-		Check(interfaceV3.register_outgoing(interfaceV3.registry, &wrf, &wrfRegistration) == IIF_CB_STATUS_OK &&
-			wrfRegistration.added == 1 && wrfRegistration.handle.value != 0,
-			"WRF Provider registers through the C ABI across DLL boundary");
-		Check(interfaceV3.register_outgoing(interfaceV3.registry, &csf, &csfRegistration) == IIF_CB_STATUS_OK &&
-			csfRegistration.handle.value != wrfRegistration.handle.value,
-			"CSF registers with a globally distinct Dispatcher handle");
-		Check(interfaceV3.register_incoming(interfaceV3.registry, &pas, &pasRegistration) == IIF_CB_STATUS_OK &&
+		const auto wrfRegistrationStatus =
+			interfaceV3.register_outgoing(interfaceV3.registry, &wrf, &wrfRegistration);
+		const auto csfRegistrationStatus =
+			interfaceV3.register_outgoing(interfaceV3.registry, &csf, &csfRegistration);
+		const auto pasRegistrationStatus =
+			interfaceV3.register_incoming(interfaceV3.registry, &pas, &pasRegistration);
+		const bool registrationsValid = wrfRegistrationStatus == IIF_CB_STATUS_OK &&
+			wrfRegistration.status == IIF_CB_STATUS_OK && wrfRegistration.added == 1 &&
+			wrfRegistration.handle.value != 0 && csfRegistrationStatus == IIF_CB_STATUS_OK &&
+			csfRegistration.status == IIF_CB_STATUS_OK && csfRegistration.added == 1 &&
+			csfRegistration.handle.value != 0 && csfRegistration.handle.value != wrfRegistration.handle.value &&
+			pasRegistrationStatus == IIF_CB_STATUS_OK && pasRegistration.status == IIF_CB_STATUS_OK &&
+			pasRegistration.added == 1 && pasRegistration.handle.value != 0 &&
 			pasRegistration.handle.value != wrfRegistration.handle.value &&
-			pasRegistration.handle.value != csfRegistration.handle.value,
-			"PAS registers in the independent Incoming stage across DLL boundary");
+			pasRegistration.handle.value != csfRegistration.handle.value;
+		if (!registrationsValid) {
+			++failures;
+			std::cerr << "FAIL: one or more Provider registrations returned an invalid status/handle; "
+				"draining Host before cleanup\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		Check(interfaceV3.unregister_provider(interfaceV3.registry, wrfRegistration.handle,
 			IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_NOT_FOUND &&
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
@@ -336,27 +408,54 @@ namespace {
 
 		IIF_CB_OutgoingProviderV3 invalid{};
 		invalid.struct_size = sizeof(invalid); invalid.version = IIF_CB_VERSION_3;
-		Check(getInvalid(&invalid) == IIF_CB_STATUS_OK, "Provider returns invalid-result test descriptor");
+		if (getInvalid(&invalid) != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: Provider invalid-result descriptor failed\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		IIF_CB_RegistrationV3 invalidProviderRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
-		Check(interfaceV3.register_outgoing(interfaceV3.registry, &invalid, &invalidProviderRegistration) ==
-			IIF_CB_STATUS_OK, "register invalid-result Provider for failure-path test");
+		const auto invalidRegistrationStatus = interfaceV3.register_outgoing(interfaceV3.registry,
+			&invalid, &invalidProviderRegistration);
+		if (invalidRegistrationStatus != IIF_CB_STATUS_OK ||
+			invalidProviderRegistration.status != IIF_CB_STATUS_OK ||
+			invalidProviderRegistration.added != 1 || invalidProviderRegistration.handle.value == 0) {
+			++failures;
+			std::cerr << "FAIL: invalid-result Provider registration did not return a usable handle\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		outgoing = MakeOutgoing();
 		outgoingResult = MakeOutgoingResult();
 		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
 			outgoingResult.status == IIF_CB_DISPATCH_INVALID_PROVIDER_RESULT &&
 			Near(outgoingResult.damage.health_damage, 100.0f),
 			"invalid cross-DLL callback status fails closed and restores the original numeric snapshot");
-		Check(interfaceV3.unregister_provider(interfaceV3.registry, invalidProviderRegistration.handle,
-			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
-			"invalid-result Provider can be unregistered before testing a failed wait");
+		const auto invalidUnregisterStatus = interfaceV3.unregister_provider(interfaceV3.registry,
+			invalidProviderRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		if (invalidUnregisterStatus != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: invalid-result Provider unregister failed; refusing to test its wait handle\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		failNextWait();
 		const auto injectedWaitFailure = interfaceV3.wait_provider_quiescent(interfaceV3.registry,
 			invalidProviderRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
-		Check(injectedWaitFailure == IIF_CB_STATUS_WAIT_FAILURE && GetModuleHandleW(providerPath) == providerModule,
-			"failed WaitQuiescent does not authorize Provider FreeLibrary");
-		Check(interfaceV3.wait_provider_quiescent(interfaceV3.registry, invalidProviderRegistration.handle,
-			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
-			"a failed C ABI wait leaves the retirement record available for a successful retry");
+		if (injectedWaitFailure != IIF_CB_STATUS_WAIT_FAILURE || GetModuleHandleW(providerPath) != providerModule) {
+			++failures;
+			std::cerr << "FAIL: injected wait did not produce the expected non-unload status\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		const auto retryWaitStatus = interfaceV3.wait_provider_quiescent(interfaceV3.registry,
+			invalidProviderRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		if (retryWaitStatus != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: retry WaitQuiescent failed with status " << retryWaitStatus << '\n';
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 
 		blockWRF();
 		std::atomic<std::uint32_t> activeDispatchStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
@@ -367,16 +466,46 @@ namespace {
 			activeDispatchStatus.store(callStatus == IIF_CB_STATUS_OK ? result.status : callStatus,
 				std::memory_order_release);
 		});
-		Check(waitWRFEntered(5000) == 1, "Provider DLL callback enters controlled blocking section");
-		Check(interfaceV3.unregister_provider(interfaceV3.registry, wrfRegistration.handle,
-			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
-			"unregister while callback is active returns Removed but not unload permission");
+		const bool callbackEntered = waitWRFEntered(5000) == 1;
+		if (!callbackEntered) {
+			++failures;
+			std::cerr << "FAIL: Provider callback did not enter the controlled blocking section\n";
+			releaseWRF();
+			callbackThread.join();
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		const auto wrfUnregisterStatus = interfaceV3.unregister_provider(interfaceV3.registry,
+			wrfRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		if (wrfUnregisterStatus != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: active WRF unregister failed with status " << wrfUnregisterStatus << '\n';
+			releaseWRF();
+			callbackThread.join();
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		HANDLE claimEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE claimRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE waitStarted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE waitFinished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE secondWaitStarted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE secondWaitFinished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		if (!claimEntered || !claimRelease || !waitStarted || !waitFinished ||
+			!secondWaitStarted || !secondWaitFinished) {
+			++failures;
+			std::cerr << "FAIL: could not create deterministic quiescence barrier events\n";
+			if (claimEntered) CloseHandle(claimEntered);
+			if (claimRelease) CloseHandle(claimRelease);
+			if (waitStarted) CloseHandle(waitStarted);
+			if (waitFinished) CloseHandle(waitFinished);
+			if (secondWaitStarted) CloseHandle(secondWaitStarted);
+			if (secondWaitFinished) CloseHandle(secondWaitFinished);
+			releaseWRF();
+			callbackThread.join();
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		std::atomic<std::uint32_t> waitStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
 		std::atomic<std::uint32_t> secondWaitStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
 		ClaimGate claimGate{ claimEntered, claimRelease };
@@ -417,8 +546,13 @@ namespace {
 		CloseHandle(waitFinished);
 		CloseHandle(secondWaitStarted);
 		CloseHandle(secondWaitFinished);
-		Check(waitStatus.load(std::memory_order_acquire) == IIF_CB_STATUS_OK,
-			"only the claim owner receives success after callback completion");
+		if (waitStatus.load(std::memory_order_acquire) != IIF_CB_STATUS_OK ||
+			secondWaitStatus.load(std::memory_order_acquire) != IIF_CB_STATUS_WAIT_IN_PROGRESS) {
+			++failures;
+			std::cerr << "FAIL: WRF quiescence did not produce exactly one successful unload authorization\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		const auto wrfCallsAtQuiescence = getCounter(1);
 		outgoing = MakeOutgoing();
 		outgoingResult = MakeOutgoingResult();
@@ -430,9 +564,14 @@ namespace {
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
 				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_NOT_FOUND,
 			"repeated unregister and wait do not recreate unload permission");
-		Check(interfaceV3.unregister_provider(interfaceV3.registry, pasRegistration.handle,
-			IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_OK,
-			"retire PAS before exercising callback-originated cross-stage Wait");
+		const auto pasUnregisterStatus = interfaceV3.unregister_provider(interfaceV3.registry,
+			pasRegistration.handle, IIF_CB_STAGE_INCOMING_HEALTH);
+		if (pasUnregisterStatus != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: PAS unregister failed with status " << pasUnregisterStatus << '\n';
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		WaitTargetState waitIncomingState{ &interfaceV3, interfaceV3.registry, pasRegistration.handle,
 			IIF_CB_STAGE_INCOMING_HEALTH };
 		IIF_CB_OutgoingProviderV3 callbackWaitProvider{};
@@ -444,66 +583,106 @@ namespace {
 		callbackWaitProvider.provider_context = &waitIncomingState;
 		callbackWaitProvider.callback = &WaitForTargetFromProvider;
 		IIF_CB_RegistrationV3 callbackWaitRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
-		Check(interfaceV3.register_outgoing(interfaceV3.registry, &callbackWaitProvider,
-			&callbackWaitRegistration) == IIF_CB_STATUS_OK,
-			"register a Host-owned Provider callback for cross-stage wait safety");
+		const auto callbackWaitRegistrationStatus = interfaceV3.register_outgoing(interfaceV3.registry,
+			&callbackWaitProvider, &callbackWaitRegistration);
+		if (callbackWaitRegistrationStatus != IIF_CB_STATUS_OK ||
+			callbackWaitRegistration.status != IIF_CB_STATUS_OK || callbackWaitRegistration.added != 1 ||
+			callbackWaitRegistration.handle.value == 0) {
+			++failures;
+			std::cerr << "FAIL: callback-wait test registration returned an invalid token/status\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
 		outgoing = MakeOutgoing();
 		outgoingResult = MakeOutgoingResult();
-		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
-			waitIncomingState.status.load(std::memory_order_acquire) == IIF_CB_STATUS_WOULD_DEADLOCK,
-			"Outgoing callback cannot wait on an Incoming Provider in the same Dispatcher");
-		Check(interfaceV3.wait_provider_quiescent(interfaceV3.registry, pasRegistration.handle,
-			IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_OK,
-			"external owner can drain PAS after the cross-stage callback has returned");
-		Check(interfaceV3.unregister_provider(interfaceV3.registry, callbackWaitRegistration.handle,
-			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK &&
+		const auto crossStageDispatchStatus = interfaceV3.dispatch_outgoing(interfaceV3.registry,
+			&outgoing, &outgoingResult);
+		if (crossStageDispatchStatus != IIF_CB_STATUS_OK ||
+			waitIncomingState.status.load(std::memory_order_acquire) != IIF_CB_STATUS_WOULD_DEADLOCK) {
+			++failures;
+			std::cerr << "FAIL: callback-originated cross-stage Wait was not safely rejected\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		const auto pasWaitStatus = interfaceV3.wait_provider_quiescent(interfaceV3.registry,
+			pasRegistration.handle, IIF_CB_STAGE_INCOMING_HEALTH);
+		const auto callbackWaitUnregisterStatus = interfaceV3.unregister_provider(interfaceV3.registry,
+			callbackWaitRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		const auto callbackWaitStatus = callbackWaitUnregisterStatus == IIF_CB_STATUS_OK ?
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, callbackWaitRegistration.handle,
-				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
-			"Host-owned callback Provider is also safely quiesced");
-		Check(interfaceV3.unregister_provider(interfaceV3.registry, csfRegistration.handle,
-			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK &&
+				IIF_CB_STAGE_OUTGOING_CALCULATION) : IIF_CB_STATUS_INTERNAL_ERROR;
+		const auto csfUnregisterStatus = interfaceV3.unregister_provider(interfaceV3.registry,
+			csfRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		const auto csfWaitStatus = csfUnregisterStatus == IIF_CB_STATUS_OK ?
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, csfRegistration.handle,
-				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
-			"CSF requires successful stage-correct quiescence before unload");
-		Check(FreeLibrary(providerModule) != 0,
-			"Provider DLL unload succeeds only after all callback code is quiescent");
+				IIF_CB_STAGE_OUTGOING_CALCULATION) : IIF_CB_STATUS_INTERNAL_ERROR;
+		if (pasWaitStatus != IIF_CB_STATUS_OK || callbackWaitUnregisterStatus != IIF_CB_STATUS_OK ||
+			callbackWaitStatus != IIF_CB_STATUS_OK || csfUnregisterStatus != IIF_CB_STATUS_OK ||
+			csfWaitStatus != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: Provider unregister/quiescence failed (PAS wait=" << pasWaitStatus
+				<< ", callback unregister/wait=" << callbackWaitUnregisterStatus << '/' << callbackWaitStatus
+				<< ", CSF unregister/wait=" << csfUnregisterStatus << '/' << csfWaitStatus
+				<< "); refusing FreeLibrary\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		if (!FreeLibrary(providerModule)) {
+			++failures;
+			std::cerr << "FAIL: Provider FreeLibrary failed after successful quiescence\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, nullptr);
+			return false;
+		}
 		outgoingResult = MakeOutgoingResult();
 		outgoing = MakeOutgoing();
 		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
 			outgoingResult.status == IIF_CB_DISPATCH_NO_PROVIDERS,
 			"Host dispatch after Provider FreeLibrary has no stale callback target");
 
+		Check(combatbus_test::WriteStartupMarker("host.before_provider_reload"),
+			"startup marker records immediately before Provider reload");
 		providerModule = LoadLibraryW(reloadProviderPath ? reloadProviderPath : providerPath);
-		Check(providerModule != nullptr, "Provider DLL reloads for Host Shutdown drain test");
-		if (providerModule) {
-			Check(ModulePathMatches(providerModule, reloadProviderPath ? reloadProviderPath : providerPath),
-				"reloaded Provider HMODULE resolves to the requested absolute DLL path");
-			// Every export address belongs to the loaded module instance. The first
-			// Provider instance was unloaded above, so refresh the entire export set;
-			// retaining even a test-only function pointer (notably GetCounter) can call
-			// into provider.dll_unloaded if the loader maps the new instance elsewhere.
-			const bool reloadedProviderExportsResolved =
-				ResolveRequired(providerModule, "TestProvider_GetWRF", getWRF, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetCSF", getCSF, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetPAS", getPAS, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetInvalid", getInvalid, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetCounter", getCounter, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetObserved", getObserved, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetOrder", getOrder, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_SetShutdown", setShutdown, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_TriggerShutdown", triggerShutdown, missingProviderExport) &&
-				ResolveRequired(providerModule, "TestProvider_GetCallbackShutdownStatus",
-					getCallbackShutdownStatus, missingProviderExport);
-			if (!reloadedProviderExportsResolved) {
-				(void)shutdown();
-				FreeLibrary(providerModule);
-				FreeLibrary(hostModule);
+		if (!providerModule) {
+			++failures;
+			std::cerr << "FAIL: Provider DLL reload failed\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, nullptr);
+			return false;
+		}
+		if (!combatbus_test::WriteStartupMarker("host.provider_reloaded")) {
+			++failures;
+			std::cerr << "FAIL: could not record Provider reload completion\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		if (!ModulePathMatches(providerModule, reloadProviderPath ? reloadProviderPath : providerPath)) {
+			++failures;
+			std::cerr << "FAIL: reloaded Provider HMODULE does not match requested absolute DLL path\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		// Every export address belongs to the loaded module instance. The first
+		// Provider instance was unloaded above, so refresh the entire export set;
+		// retaining even a test-only function pointer can call unloaded code.
+		const bool reloadedProviderExportsResolved =
+			ResolveRequired(providerModule, "TestProvider_GetWRF", getWRF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetCSF", getCSF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetPAS", getPAS, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetInvalid", getInvalid, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetCounter", getCounter, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetObserved", getObserved, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetOrder", getOrder, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_SetShutdown", setShutdown, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_TriggerShutdown", triggerShutdown, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetCallbackShutdownStatus",
+				getCallbackShutdownStatus, missingProviderExport);
+		if (!reloadedProviderExportsResolved) {
+				const bool cleanupSucceeded = ShutdownAndUnload(hostModule, shutdown, providerModule);
 				bool isExpectedMissingExport = expectedMissingReloadExport != nullptr;
-				if (isExpectedMissingExport) {
+				if (isExpectedMissingExport && cleanupSucceeded) {
 					std::size_t index{};
 					for (; missingProviderExport[index] != '\0' && expectedMissingReloadExport[index] != L'\0';
 						++index) {
@@ -525,67 +704,105 @@ namespace {
 				++failures;
 				std::cerr << "FAIL: reload aborted safely at missing export '"
 					<< (missingProviderExport ? missingProviderExport : "<unknown>") << "'\n";
+				if (!cleanupSucceeded) std::cerr << "FAIL: cleanup did not obtain successful Host Shutdown\n";
 				return false;
 			}
-			resetProvider();
-			setShutdown(shutdown);
-			wrf = {};
-			wrf.struct_size = sizeof(wrf); wrf.version = IIF_CB_VERSION_3;
-			IIF_CB_RegistrationV3 shutdownRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
-			Check(getWRF(&wrf) == IIF_CB_STATUS_OK &&
-				interfaceV3.register_outgoing(interfaceV3.registry, &wrf, &shutdownRegistration) == IIF_CB_STATUS_OK,
-				"register Provider before global Host shutdown");
-			blockWRF();
-			std::thread shutdownCaller([&] {
-				auto context = MakeOutgoing();
-				auto result = MakeOutgoingResult();
-				(void)interfaceV3.dispatch_outgoing(interfaceV3.registry, &context, &result);
-			});
-			Check(waitWRFEntered(5000) == 1, "Host shutdown test callback enters Provider DLL");
-			const auto callbacksBeforeShutdownClose = getCounter(1);
-			std::atomic<std::uint32_t> shutdownStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
-			std::atomic<bool> shutdownDone{ false };
-			std::thread shutdownThread([&] {
-				shutdownStatus.store(shutdown(), std::memory_order_release);
-				shutdownDone.store(true, std::memory_order_release);
-			});
-			IIF_CB_InterfaceV3 afterClose{};
-			afterClose.struct_size = sizeof(afterClose); afterClose.version = IIF_CB_VERSION_3;
-			std::uint32_t queryStatus = IIF_CB_STATUS_OK;
-			for (std::uint32_t attempt = 0; attempt < 10000 && queryStatus == IIF_CB_STATUS_OK; ++attempt) {
-				queryStatus = query(IIF_CB_VERSION_3, sizeof(afterClose), &afterClose);
-				if (queryStatus == IIF_CB_STATUS_OK) SwitchToThread();
-			}
-			Check(queryStatus == IIF_CB_STATUS_SHUTTING_DOWN,
-				"QueryInterface stops returning tables as soon as Host shutdown closes its gate");
-			Check(!shutdownDone.load(std::memory_order_acquire),
-				"Host Shutdown waits for a callback already entered through the interface");
-			outgoingResult = MakeOutgoingResult();
-			outgoing = MakeOutgoing();
-			Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) ==
-				IIF_CB_STATUS_SHUTTING_DOWN && outgoingResult.status == IIF_CB_DISPATCH_CLOSED,
-				"previously copied Interface rejects calls during Host shutdown");
-			Check(getCounter(1) == callbacksBeforeShutdownClose,
-				"closed Host gate prevents another callback from entering the Provider DLL");
+		resetProvider();
+		setShutdown(shutdown);
+		wrf = {};
+		wrf.struct_size = sizeof(wrf); wrf.version = IIF_CB_VERSION_3;
+		IIF_CB_RegistrationV3 shutdownRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		const auto shutdownDescriptorStatus = getWRF(&wrf);
+		const auto shutdownRegistrationStatus = shutdownDescriptorStatus == IIF_CB_STATUS_OK ?
+			interfaceV3.register_outgoing(interfaceV3.registry, &wrf, &shutdownRegistration) :
+			IIF_CB_STATUS_INTERNAL_ERROR;
+		if (shutdownDescriptorStatus != IIF_CB_STATUS_OK || shutdownRegistrationStatus != IIF_CB_STATUS_OK ||
+			shutdownRegistration.status != IIF_CB_STATUS_OK || shutdownRegistration.added != 1 ||
+			shutdownRegistration.handle.value == 0) {
+			++failures;
+			std::cerr << "FAIL: shutdown-test Provider registration failed; refusing to use its handle\n";
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
+		}
+		blockWRF();
+		std::thread shutdownCaller([&] {
+			auto context = MakeOutgoing();
+			auto result = MakeOutgoingResult();
+			(void)interfaceV3.dispatch_outgoing(interfaceV3.registry, &context, &result);
+		});
+		if (waitWRFEntered(5000) != 1) {
+			++failures;
+			std::cerr << "FAIL: Host shutdown callback did not enter Provider DLL\n";
 			releaseWRF();
 			shutdownCaller.join();
-			shutdownThread.join();
-		Check(shutdownStatus.load(std::memory_order_acquire) == IIF_CB_STATUS_OK &&
-			shutdownDone.load(std::memory_order_acquire) && getCounter(1) == callbacksBeforeShutdownClose,
-			"Host Shutdown completes after its active callback and API call drain");
-		Check(shutdown() == IIF_CB_STATUS_OK,
-			"repeated exported Host Shutdown remains idempotent");
-		Check(FreeLibrary(providerModule) != 0,
-				"global shutdown drain permits Provider DLL unload after active callback returns");
+			(void)ShutdownAndUnload(hostModule, shutdown, providerModule);
+			return false;
 		}
-		Check(FreeLibrary(hostModule) != 0,
-			"Host DLL unload occurs only after shutdown and all Host caller threads are joined");
+		const auto callbacksBeforeShutdownClose = getCounter(1);
+		std::atomic<std::uint32_t> shutdownStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
+		std::atomic<bool> shutdownDone{ false };
+		std::thread shutdownThread([&] {
+			shutdownStatus.store(shutdown(), std::memory_order_release);
+			shutdownDone.store(true, std::memory_order_release);
+		});
+		IIF_CB_InterfaceV3 afterClose{};
+		afterClose.struct_size = sizeof(afterClose); afterClose.version = IIF_CB_VERSION_3;
+		std::uint32_t shutdownQueryStatus = IIF_CB_STATUS_OK;
+		for (std::uint32_t attempt = 0; attempt < 10000 && shutdownQueryStatus == IIF_CB_STATUS_OK; ++attempt) {
+			shutdownQueryStatus = query(IIF_CB_VERSION_3, sizeof(afterClose), &afterClose);
+			if (shutdownQueryStatus == IIF_CB_STATUS_OK) SwitchToThread();
+		}
+		Check(shutdownQueryStatus == IIF_CB_STATUS_SHUTTING_DOWN,
+			"QueryInterface stops returning tables as soon as Host shutdown closes its gate");
+		Check(!shutdownDone.load(std::memory_order_acquire),
+			"Host Shutdown waits for a callback already entered through the interface");
+		outgoingResult = MakeOutgoingResult();
+		outgoing = MakeOutgoing();
+		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) ==
+			IIF_CB_STATUS_SHUTTING_DOWN && outgoingResult.status == IIF_CB_DISPATCH_CLOSED,
+			"previously copied Interface rejects calls during Host shutdown");
+		Check(getCounter(1) == callbacksBeforeShutdownClose,
+			"closed Host gate prevents another callback from entering the Provider DLL");
+		releaseWRF();
+		shutdownCaller.join();
+		shutdownThread.join();
+		const auto completedShutdownStatus = shutdownStatus.load(std::memory_order_acquire);
+		if (completedShutdownStatus != IIF_CB_STATUS_OK || !shutdownDone.load(std::memory_order_acquire) ||
+			getCounter(1) != callbacksBeforeShutdownClose || shutdown() != IIF_CB_STATUS_OK) {
+			++failures;
+			std::cerr << "FAIL: Host Shutdown did not successfully drain; keeping Provider and Host loaded\n";
+			return false;
+		}
+		if (!combatbus_test::WriteStartupMarker("host.shutdown_drained")) {
+			++failures;
+			std::cerr << "FAIL: could not record successful Host Shutdown\n";
+			return false;
+		}
+		if (!FreeLibrary(providerModule)) {
+			++failures;
+			std::cerr << "FAIL: Provider FreeLibrary failed after successful Host Shutdown\n";
+			return false;
+		}
+		if (!FreeLibrary(hostModule)) {
+			++failures;
+			std::cerr << "FAIL: Host FreeLibrary failed after successful Shutdown\n";
+			return false;
+		}
+		if (!combatbus_test::WriteStartupMarker("host.modules_unloaded")) {
+			++failures;
+			std::cerr << "FAIL: could not record completed module unload\n";
+			return false;
+		}
 		return failures == 0;
 	}
 }
 
 int wmain(int argc, wchar_t** argv)
 {
+	if (!combatbus_test::WriteStartupMarker("host.wmain.entered", true)) {
+		std::cerr << "FAIL: could not initialize the startup trace file\n";
+		return 90;
+	}
 	if (argc != 3 && argc != 5) {
 		std::cerr << "Usage: CrossDllHost.exe <IIF mock DLL> <Provider DLL> "
 			"[<reload Provider DLL> <expected missing export>]\n";
@@ -593,7 +810,15 @@ int wmain(int argc, wchar_t** argv)
 	}
 	const bool ok = Run(argv[1], argv[2], argc == 5 ? argv[3] : nullptr,
 		argc == 5 ? argv[4] : nullptr);
+	if (!combatbus_test::WriteStartupMarker("host.test_finished")) {
+		std::cerr << "FAIL: could not record test-flow completion\n";
+		return 91;
+	}
 	if (failures == 0 && ok) {
+		if (!combatbus_test::WriteStartupMarker("host.before_normal_exit")) {
+			std::cerr << "FAIL: could not record normal process exit marker\n";
+			return 92;
+		}
 		std::cout << "PASS: Host/IIF/Provider cross-DLL ABI and unload fixtures\n";
 		return 0;
 	}

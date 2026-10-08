@@ -166,3 +166,55 @@ The historical Clang-cl failure is **NOT REPRODUCED** in the Phase 1U rebuilt te
 ## Post-fix acceptance gate
 
 Rebuild both compilers into fresh, disjoint directories; record fresh EXE/DLL SHA-256; run each CTest serially; then run the already-built Clang-cl and MSVC CTest processes concurrently in their own directories. Repeat the parallel cross-DLL run at least 25 times with deterministic output capture. Confirm that each Host process resolves Provider exports only from the currently loaded `HMODULE`, that all Provider callback entries are quiescent before `FreeLibrary`, and that no new Application Error event occurs for these Host executables. A pass after fixing the stale pointer does not establish native Hook safety or prove all prior failures shared this root cause.
+
+## Phase 1V startup-only and stability follow-up
+
+### Historical startup-boundary review
+
+The exact old dump and failed Phase 1T EXE remain the evidence set described above. The old executable PE entry RVA is 0x4DB0 and the captured RIP equals ExceptionAddress there, but the exact matching instruction is sub rsp, 0x28, inconsistent with the reported write access to the same address. The dump lists the Host EXE and OS modules but not the simulated IIF Host DLL or Provider DLL. This is consistent with failure before those test DLLs loaded; it does not prove the process had not entered wmain or identify a cause. Its one captured thread stack does not permit a reliable unwind. Root cause remains UNKNOWN. No antivirus, compiler, injection, or loader attribution is supported. No mismatched PDB or new build symbols were used, and this review did not expand into broad reverse engineering.
+
+### Current startup probes and markers
+
+A minimal startup_probe.exe performs no DLL load or CombatBus call. Both MSVC and Clang-cl runs recorded probe.wmain.entered and probe.before_return, then exited normally. Successful full Host runs recorded, in order: host.wmain.entered; host.before_host_dll_load; host.host_dll_loaded; host.before_provider_dll_load; host.provider_dll_loaded; host.before_provider_reload; host.provider_reloaded; host.shutdown_drained; host.modules_unloaded; host.test_finished; host.before_normal_exit. These markers establish progress only for current runs and cannot locate the historical failure.
+
+### Harness fail-fast review
+
+CrossDllHost.cpp aborts on incomplete QueryInterface tables, wrong loaded module paths, missing required exports, failed Provider descriptor creation, unusable registration handles, failed unregister, failed/injected quiescence waits, and failed Host Shutdown. Provider exports are rebound and validated after reload before use. Failed Provider quiescence does not reach Provider FreeLibrary; failed Host Shutdown keeps modules loaded. The missing-export reload fixture reports the exact missing export and performs controlled cleanup. Barrier creation/entry failure paths release and join the callback before cleanup. The test does not unload an executing callback.
+
+### Phase 1V builds and tests
+
+Compilation used xmake in disjoint output directories under workspace scratch. CMake only configured seven CTest entries to run already-built xmake outputs by absolute path. All builds completed before tests ran.
+
+- MSVC 19.44.35227 x64 Release: build PASS; serial CTest 7/7 PASS.
+- Clang-cl 21.1.8 x64 Release using the MSVC linker: build PASS; serial CTest 7/7 PASS.
+- MSVC x64 AddressSanitizer Debug: build PASS; serial CTest 7/7 PASS. The runtime directory was added only to the test process PATH. The initial missing-runtime test invocation was setup failure, not a pass.
+- Paired parallel test: 25 rounds; each ran MSVC and Clang-cl CTest from disjoint completed build/test roots. Both passed 25/25; all exit codes were zero and hashes were unchanged.
+- Mixed Host EXE × Host DLL × Provider DLL: all eight compiler combinations passed, with absolute DLL paths and module-path validation.
+- Startup probes and full Host phase markers passed for both Release compilers.
+
+A first MSVC ASan xmake build failed with C1041 because parallel cl.exe processes wrote the same PDB; rebuilding with /FS passed. Earlier CMake build attempts emitted Visual Studio generator path warnings and were superseded by xmake. These setup failures are recorded and are not counted as passes.
+
+Representative artifact SHA-256 values follow. All test EXEs/DLLs were hashed before and after the 25 paired runs; none changed.
+
+| Configuration | Artifact | SHA-256 |
+|---|---|---|
+| MSVC Release | Host EXE | 04608E7FF381F5F5852DFDB14A849A5F06A663BB301447AA4351BDE5AD5DBF2A |
+| MSVC Release | Mock Host DLL | AB834F72F0863864894636DFCE5FD76CAF846AE2D8AB6E131344BC528C540290 |
+| MSVC Release | Provider DLL | 522102C518D624B7AF3A593BC96438D191F9B1AEB1C17F0F896DC3F0122B78FC |
+| MSVC Release | Missing-export Provider DLL | 1EB452A59770746691C270FE1B1918BE13B65C23E087B9CA1380D1AFA5FD30B1 |
+| MSVC Release | Fixture EXE | 937328F9C0935E17F053CC398EFC12ABE259D27FCAF72C9E929EDA58EC63E3EA |
+| MSVC Release | Startup probe | BB1DA472185FE4C171A2DBA784FB8DDBA58BFBA70B2A0267F5B5F1AFFAA14B93 |
+| Clang-cl Release | Host EXE | 81215B420350D4CC7E62D6EEA733D29D7AE61F0DF863009E52AF2312CC13AF7B |
+| Clang-cl Release | Mock Host DLL | DE7AF76110B9E756BF251C167E7D7911BD98335363C1BE35A31775AB06554380 |
+| Clang-cl Release | Provider DLL | 90FC66BF5527585051D4E0E91BA69CB71209D6761E7FCA81E10AE1C5137E75C6 |
+| Clang-cl Release | Missing-export Provider DLL | 5FEF24598875110141254F2AC6A4E2B91608D00D2A16F093889F3696D79D0D6F |
+| Clang-cl Release | Fixture EXE | A73E26555D5F8AAC35CEA3CCA4C13DA908FAEF9C4C54CFCB24CA0B679159222B |
+| Clang-cl Release | Startup probe | 5CF69ADBA5F059F0421A9BAFE8F911AFDC6CAFAABE79700A688D3769915662DA |
+| MSVC ASan Debug | Host EXE | 5667341C37C0745B80A04C2BABA5F54E02BCCC9FE945043209AB24EADF3958A4 |
+| MSVC ASan Debug | Mock Host DLL | D984A3C4AE4E95143F7B1ACB35ABC63E690389BA8FBB103DE6B1FD7E303C451E |
+| MSVC ASan Debug | Provider DLL | 9DA7B889D4B170A1BA5B1D2B9BCDC86C719BB0941FD7435AFB417385BF2D6A1D |
+| MSVC ASan Debug | Missing-export Provider DLL | E77BBB9F1EBA1ED2BC9DAE5C70455FD6E3EA40869156558127A155C718B11333 |
+| MSVC ASan Debug | Fixture EXE | E375E05EAD15FAEE088E0552C21A76D941714523323368F1ABAE4B9242266218 |
+| MSVC ASan Debug | Startup probe | 21C5E33BBC9A6FDE31C3F67FF3DF0F42DB96903EA3B7071E5332D36005FA772A |
+
+These are local fixture results, not GitHub Actions or game-runtime validation. The historical Clang-cl exception is NOT REPRODUCED, not resolved. Current fixture stability does not prove every ABI, loader, or production-hook condition.

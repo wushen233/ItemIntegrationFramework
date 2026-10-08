@@ -66,18 +66,9 @@ The callback contract forbids C++ exceptions from escaping a Provider callback. 
 
 ## Build and run
 
-Configure with CMake using an available C++20 compiler, then build and run CTest. Keep the build directory outside this source directory and repository, for example:
+This research tree uses xmake.lua as its build definition. Keep temporary build output under the workspace scratch tree; do not use the system drive TEMP directory. In the isolated Phase 1V run, the clone and xmake outputs were under E:\FO4ModWorkspace\scratch\iif-combatbus-phase1v-review\research\combatbus-v3-offline\build-phase1v\. CMakeLists.txt is retained only as a CTest runner/manifest when COMBATBUS_EXTERNAL_BINARY_DIR points at already-built xmake artifacts; no CMake build was used for the Phase 1V matrix.
 
-```powershell
-cmake -S research/combatbus-v3-offline -B "$env:TEMP\combatbus-phase1r-build" -A x64
-cmake --build "$env:TEMP\combatbus-phase1r-build" --config Release
-ctest --test-dir "$env:TEMP\combatbus-phase1r-build" -C Release --output-on-failure
-```
-
-The Windows x64 configuration builds the original single-EXE fixtures plus the independent Host DLL, Provider DLL, and dynamic-loading Host executable. On non-Windows or non-x64 hosts, CMake reports that the cross-DLL target is unsupported and does not claim that test passed.
-
-Phase 1R local verification: MSVC 19.50.35728 Release passed both CTest targets; Clang-cl 21.1.8 Release passed both targets. Mixed MSVC/Clang-cl Host, IIF, and Provider module combinations also passed. The MSVC cross-DLL Host fixture passed 25 consecutive extra runs. MSVC AddressSanitizer Release passed both targets after adding `/Zi` and making the sanitizer runtime directory available on `PATH`. These are local offline results, not CI attestations or game-runtime validation.
-
+Windows x64 targets include the single-process fixture, simulated Host DLL, full and missing-export Provider DLLs, dynamic-loading Host, and startup-only probe. Results are local offline evidence, not GitHub CI or game-runtime validation.
 ## Phase 1S quiescence ownership
 
 Each retired record contains an atomic wait-claim bit. A waiter copies the record under the registry mutex, releases that mutex, then uses compare-exchange to claim the one permitted wait. A competing waiter returns `WaitInProgress` without blocking on the Provider Entry and without receiving unload permission. The owner that designated itself to consume the Handle receives `Quiescent` only after the Entry drain and retirement-record removal. A wait failure resets the claim and retains the retirement record for retry. The C ABI maps `WaitInProgress` to the appended status value 13; no public structure layout or function-table layout changed.
@@ -91,3 +82,9 @@ The Dispatcher tracks active callback frames by Dispatcher identity, not only by
 - [`CLANGCL-CRASH-INVESTIGATION.md`](CLANGCL-CRASH-INVESTIGATION.md) records the stale `TestProvider_GetCounter` use-after-unload already fixed, plus the later Clang-cl `0xC0000005` Host failure. Phase 1U parsed its existing minidump with DbgHelp: ExceptionAddress/RIP are Host RVA `0x4DB0`, but the captured write target is inconsistent with the exact entry instruction, so root cause remains UNKNOWN. New missing-export guards have a negative reload fixture; fresh MSVC/Clang-cl 25-repeat suites, seven mixed compiler combinations, and MSVC ASan passed. The historical failure is NOT REPRODUCED, not resolved; ABI freeze and production hooks remain blocked/not approved.
 
 Phase 1T remains offline-only. The public ABI candidate is not frozen; there is no game runtime validation, production migration, or production Hook approval.
+
+## Phase 1V startup and stability follow-up
+
+CLANGCL-CRASH-INVESTIGATION.md records the bounded startup review and current test evidence. The historical dump still lacks a reliable call stack and remains UNKNOWN. Current startup probes establish only which markers were reached in these new runs. Both compiler families reached wmain and normal return; the full Host fixture reached the expected Host/Provider loads, reload, Shutdown drain, unload, and normal exit.
+
+WINDOWS-CI-PLAN.md proposes an MSVC/Clang-cl Windows matrix. No GitHub workflow is installed by this research change. Build outputs, CTest logs, and marker files were kept under workspace scratch and are removed after testing; no binaries are committed.
