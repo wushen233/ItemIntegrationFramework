@@ -26,17 +26,21 @@ namespace {
 	thread_local std::uint32_t g_callbackDepth = 0;
 	thread_local const void* g_apiCallStack[64]{};
 	thread_local std::uint32_t g_apiCallDepth = 0;
+	#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 	std::atomic<UnregisterFailurePoint> g_unregisterFailurePoint{ UnregisterFailurePoint::None };
 	std::atomic<Testing::QuiescenceClaimHook> g_quiescenceClaimHook{};
 	std::atomic<void*> g_quiescenceClaimContext{};
 	std::atomic<bool> g_failNextQuiescenceWait{};
+	#endif
 
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 	[[nodiscard]] bool ConsumeUnregisterFailure(UnregisterFailurePoint point) noexcept
 	{
 		auto expected = point;
 		return g_unregisterFailurePoint.compare_exchange_strong(expected, UnregisterFailurePoint::None,
 			std::memory_order_acq_rel);
 	}
+#endif
 
 	class DispatchGuard final {
 	public:
@@ -87,11 +91,13 @@ namespace {
 		return false;
 	}
 
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 	void RunAfterQuiescenceClaimHook() noexcept
 	{
 		const auto hook = g_quiescenceClaimHook.load(std::memory_order_acquire);
 		if (hook) hook(g_quiescenceClaimContext.load(std::memory_order_relaxed));
 	}
+#endif
 
 	[[nodiscard]] bool IsActiveApiCall(const void* owner) noexcept
 	{
@@ -489,9 +495,11 @@ namespace {
 			});
 			if (found == current->end()) return UnregisterStatus::NotFound;
 			const auto entry = *found;
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 			if (ConsumeUnregisterFailure(UnregisterFailurePoint::SnapshotPreparation)) {
 				return UnregisterStatus::AllocationFailure;
 			}
+#endif
 			Snapshot nextSnapshot;
 			try {
 				auto next = std::make_shared<ProviderList>();
@@ -502,12 +510,14 @@ namespace {
 				return UnregisterStatus::AllocationFailure;
 			}
 			try {
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 				if (ConsumeUnregisterFailure(UnregisterFailurePoint::RetirementInsertion)) {
 					return UnregisterStatus::AllocationFailure;
 				}
 				if (ConsumeUnregisterFailure(UnregisterFailurePoint::RetiredRecordAllocation)) {
 					return UnregisterStatus::AllocationFailure;
 				}
+#endif
 				auto retired = std::make_shared<RetiredRecord>(entry);
 				const auto [unused, inserted] = _retired.emplace(handle.value, std::move(retired));
 				(void)unused;
@@ -538,11 +548,13 @@ namespace {
 			if (!record->waitClaimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
 				std::memory_order_acquire)) return QuiescenceStatus::WaitInProgress;
 
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 			RunAfterQuiescenceClaimHook();
 			if (g_failNextQuiescenceWait.exchange(false, std::memory_order_acq_rel)) {
 				record->waitClaimed.store(false, std::memory_order_release);
 				return QuiescenceStatus::WaitFailure;
 			}
+#endif
 			try {
 				record->entry->Wait();
 			} catch (...) {
@@ -710,6 +722,7 @@ struct Dispatcher::Impl {
 	}
 };
 
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 void Testing::FailNextUnregisterAt(UnregisterFailurePoint point) noexcept
 {
 	g_unregisterFailurePoint.store(point, std::memory_order_release);
@@ -725,6 +738,7 @@ void Testing::FailNextQuiescenceWait() noexcept
 {
 	g_failNextQuiescenceWait.store(true, std::memory_order_release);
 }
+#endif
 
 Dispatcher::Dispatcher() : _impl(std::make_unique<Impl>()) {}
 Dispatcher::~Dispatcher()
@@ -749,10 +763,12 @@ ShutdownStatus Dispatcher::Shutdown() noexcept
 	}
 }
 
+#if defined(IIF_COMBATBUS_OFFLINE_TESTING)
 bool Dispatcher::IsAcceptingCallsForTesting() const noexcept
 {
 	return _impl && !_impl->calls.IsClosed();
 }
+#endif
 
 RegistrationResult Dispatcher::RegisterOutgoing(const OutgoingProviderV3* provider)
 {

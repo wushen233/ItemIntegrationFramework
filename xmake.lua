@@ -40,6 +40,7 @@ target("ItemIntegrationFramework")
     set_pcxxheader("src/pch.h")
     set_encodings("utf-8")
     add_cxxflags("/utf-8", { force = true, tools = { "msvc", "clang-cl" } })
+    add_defines("IIF_CB_HOST_EXPORTS", "IIF_CB_PRODUCTION_HOST")
 
     add_defines(
         'PLUGIN_NAME="ItemIntegrationFramework"',

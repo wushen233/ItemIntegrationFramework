@@ -162,9 +162,11 @@ namespace {
 	public:
 		~Host()
 		{
+#if !defined(IIF_CB_PRODUCTION_HOST)
 			// A DLL may be unloaded under the loader lock. Require the explicit
 			// exported Shutdown before that point; never start a blocking drain here.
 			if (!shutdownComplete) std::terminate();
+#endif
 		}
 
 		Dispatcher dispatcher;
@@ -172,6 +174,7 @@ namespace {
 		std::mutex shutdownMutex;
 		std::mutex bridgesMutex;
 		std::unique_ptr<BridgeBase> bridges;
+#if !defined(IIF_CB_PRODUCTION_HOST)
 		bool shutdownComplete{};
 
 		std::uint32_t Shutdown() noexcept
@@ -193,6 +196,7 @@ namespace {
 				return IIF_CB_STATUS_WAIT_FAILURE;
 			}
 		}
+#endif
 
 		bool IsActiveCall() const noexcept
 		{
@@ -237,10 +241,18 @@ namespace {
 
 	Host& GetHost()
 	{
+#if defined(IIF_CB_PRODUCTION_HOST)
+		// IIF owns this Registry for the process lifetime. Intentionally leak the
+		// singleton so DLL detach never runs a blocking Dispatcher destructor under
+		// the loader lock. Providers use per-handle unregister + quiescence instead.
+		static Host* host = new Host();
+		return *host;
+#else
 		// Initialize on the first exported API call, after LoadLibrary returned;
 		// do not allocate or construct the Dispatcher from DLL process attach.
 		static Host host;
 		return host;
+#endif
 	}
 
 #define g_host GetHost()
@@ -555,6 +567,7 @@ extern "C" IIF_CB_API std::uint32_t IIF_CB_CALL IIF_CombatBus_QueryInterface(
 	}
 }
 
+#if !defined(IIF_CB_PRODUCTION_HOST)
 extern "C" IIF_CB_API std::uint32_t IIF_CB_CALL IIF_CombatBus_Shutdown(void)
 {
 	try {
@@ -563,8 +576,9 @@ extern "C" IIF_CB_API std::uint32_t IIF_CB_CALL IIF_CombatBus_Shutdown(void)
 		return IIF_CB_STATUS_WAIT_FAILURE;
 	}
 }
+#endif
 
-#if defined(IIF_CB_TEST_HOOKS)
+#if defined(IIF_CB_TEST_HOOKS) && !defined(IIF_CB_PRODUCTION_HOST)
 extern "C" IIF_CB_API void IIF_CB_CALL IIF_CombatBus_Test_SetQuiescenceClaimHook(
 	IIF_CB_TestQuiescenceClaimHook hook, void* context)
 {

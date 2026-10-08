@@ -1,5 +1,7 @@
 # IIF CombatBus V3 Production Migration Plan (Read-Only Review)
 
+> Historical Phase 1T inspection. Phase 2B has since integrated the V3 Registry/C ABI infrastructure under `src/CombatBusV3/`; the no-Hook boundary and remaining native adapter work are summarized in `PHASE-2B-INTEGRATION.md`.
+
 **Status: design proposal only. No production source was modified. No native hook is approved.**
 
 This plan is based on read-only inspection of the current workspace sources, chiefly `projects/ItemIntegrationFramework/src/main.cpp`, `IIF_API.h`, `CombatBusAPI.h`, `CombatBusRegistry.h`, and the current WRF/CSF callbacks. It is not a full build/release review and does not establish Fallout 4 callsite safety.

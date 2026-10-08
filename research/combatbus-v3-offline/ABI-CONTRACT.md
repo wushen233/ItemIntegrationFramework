@@ -2,7 +2,7 @@
 
 **Status: candidate for final review; not frozen and not approved for production use.**
 
-This document describes the isolated offline C ABI candidate in `include/CombatBusCABI.h` and its mock Host adapter. It does not define Fallout 4 native hook locations, nor does a successful fixture establish compatibility with every compiler, runtime, loader state, or game call path.
+This document describes the C ABI candidate in `src/CombatBusV3/CombatBusCABI.h` and its production/mock Host adapters. It does not define Fallout 4 native hook locations, nor does a successful fixture establish compatibility with every compiler, runtime, loader state, or game call path.
 
 ## Version and structure handshake
 
@@ -68,16 +68,16 @@ The embedded dispatch result status is a separate domain: `APPLIED = 0`, `NO_PRO
 
 `Unregister == OK` means only that the Provider is disabled for future snapshots. It does not mean all callbacks have returned. For an individual Provider unload protocol, the owner first calls stage-correct Unregister, then designates **one** owner thread to call stage-correct Wait, and may unload callback code/context only after that call returns `OK`. `WAIT_IN_PROGRESS`, `WAIT_FAILURE`, `NOT_FOUND`, `WOULD_DEADLOCK`, `SHUTTING_DOWN`, invalid arguments, or any unknown future status do not authorize unload. The Registry gives one caller the wait claim but does not authenticate caller identity; Provider owners must enforce a single designated unload waiter themselves.
 
-Global Host Shutdown is a separate lifetime path. The owner first stops all new ingress through copied tables, then calls `IIF_CombatBus_Shutdown`. A successful Shutdown closes the Host gate, drains Host API calls and Dispatcher callbacks already entered, and releases Host-held bridges/registries. The owner then joins every thread that could call the interface before destroying Host state or unloading the Host DLL. It can establish that the Host will no longer call registered Provider callbacks, but it does not stop Provider-owned worker threads or unrelated Provider execution; each Provider must stop and join its own work before unloading its module/context. A failed or reentrant Shutdown grants no unload permission. Shutdown is not a per-Provider Wait result.
+Global Host Shutdown is a separate mock-fixture lifecycle path. The offline mock owner first stops new ingress through copied tables, then calls its test-only `IIF_CombatBus_Shutdown`. A successful mock Shutdown closes the Host gate, drains entered calls/callbacks, and releases mock bridges/registries. Production IIF does not export this operation: its Host is process-lifetime state and arbitrary Providers cannot close it. A Provider must stop and join its own work before unloading; successful per-Provider quiescence only drains callbacks initiated through the Registry. A failed/reentrant mock Shutdown grants no unload permission, and mock Shutdown is not a per-Provider Wait result.
 
 ## Ownership, exceptions, and module lifetime
 
 - `provider_id` is borrowed only for the registration call; the Host copies it.
 - `provider_context`, callback function address, opaque Actor/Weapon handles, context records, and result records are borrowed. Context/result storage is valid only for the synchronous callback. Providers must not retain or free Host/engine pointers.
-- The Provider owns callback code and `provider_context`; it must keep them alive through removal plus successful quiescence, or through successful global Host Shutdown and its own worker-thread join.
+- The Provider owns callback code and `provider_context`; it must keep them alive through removal plus successful quiescence. Only the isolated mock fixture permits its test owner to use successful global Host Shutdown as an alternative drain; production IIF has no Provider-accessible global Shutdown.
 - No C++ exception, STL object, allocator-owned object, CRT object, or cross-module ownership transfer is part of this ABI. Provider callbacks catch their own exceptions and return `FAILURE`; catching on the Host side is defensive only and does not promise cross-runtime unwinding safety.
-- No lifecycle work may depend on `DllMain`. Query/Shutdown exports are called explicitly by the owner outside loader-lock teardown.
-- A successful Host Shutdown is valid only under the owner-side stop-ingress/join-caller protocol. It cannot make a stale function pointer or concurrent call through freed Host storage safe.
+- No lifecycle work may depend on `DllMain`. The Query export is called explicitly after module load; the mock-only Shutdown export is not part of production IIF.
+- Mock Host Shutdown is valid only under the owner-side stop-ingress/join-caller protocol. It cannot make a stale function pointer or concurrent call through freed Host storage safe.
 
 ## Registry linearization
 
@@ -86,7 +86,7 @@ Global Host Shutdown is a separate lifetime path. The owner first stops all new 
 - Wait claims the retired record with a single compare-exchange and performs the potentially blocking Entry drain without holding the Registry write lock. A competitor gets `WAIT_IN_PROGRESS`; failed waits release their claim and preserve retry; the successful claim drains and consumes the record once.
 - A Wait must follow removal. Only `Quiescent` is mapped to C `OK`; every other Wait result maps to a non-success C status. Unknown numeric statuses must be treated by consumers as failure/no-unload.
 - A Provider callback may register Providers, but it must not synchronously wait for any Provider in the same Dispatcher, including the opposite stage. Such waits return `WOULD_DEADLOCK` to prevent cross-Provider wait cycles.
-- Dispatcher shutdown rejects new leases, drains current leases, and clears state without allocating. The owner must stop ingress and join all call threads before object destruction; concurrent destruction is unsupported.
+- The internal Dispatcher shutdown rejects new leases, drains current leases, and clears state without allocating. It is used by the offline mock owner; production IIF uses process-lifetime ownership. Any owner that destroys a Dispatcher must stop ingress and join all call threads first; concurrent destruction is unsupported.
 
 ## Freeze blockers / review notes
 

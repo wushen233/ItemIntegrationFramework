@@ -215,16 +215,20 @@ typedef struct IIF_CB_InterfaceV3 {
 	IIF_CB_DispatchIncomingFn dispatch_incoming;
 } IIF_CB_InterfaceV3;
 
+#if defined(IIF_CB_TEST_HOST_CONTROL)
+/* Test-harness-only control surface. Production Providers cannot shut down IIF. */
 typedef uint32_t (IIF_CB_CALL *IIF_CB_ShutdownFn)(void);
+#endif
 
 /* Query copies a function table into caller storage; caller_size and the input
  * struct_size must both exactly match V3. The copy owns no registry state. */
 IIF_CB_API uint32_t IIF_CB_CALL IIF_CombatBus_QueryInterface(uint32_t requested_version,
 	uint32_t caller_size, IIF_CB_InterfaceV3* out_interface);
 
-/* Owner must stop/join new callers before this call. It closes the Host gate,
- * drains entered API calls, then closes the Dispatcher. Do not call from a callback. */
+/* Available only to the isolated mock Host fixture; never exported by production IIF. */
+#if defined(IIF_CB_TEST_HOST_CONTROL)
 IIF_CB_API uint32_t IIF_CB_CALL IIF_CombatBus_Shutdown(void);
+#endif
 
 #ifdef __cplusplus
 }
