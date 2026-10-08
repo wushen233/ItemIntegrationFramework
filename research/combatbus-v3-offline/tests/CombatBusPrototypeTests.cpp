@@ -51,6 +51,27 @@ namespace {
 	std::condition_variable g_gateCv;
 	bool g_callbackEntered = false;
 	bool g_callbackRelease = false;
+	struct QuiescenceClaimGate {
+		std::mutex mutex;
+	std::condition_variable condition;
+	bool entered{};
+	bool release{};
+	};
+
+	void PauseAfterQuiescenceClaim(void* opaque) noexcept
+	{
+		auto& gate = *static_cast<QuiescenceClaimGate*>(opaque);
+		std::unique_lock lock{ gate.mutex };
+		gate.entered = true;
+		gate.condition.notify_all();
+		gate.condition.wait(lock, [&] { return gate.release; });
+	}
+
+	struct WaitUntilReturned {
+		std::mutex mutex;
+		std::condition_variable condition;
+		bool finished{};
+	};
 
 	void Require(bool condition, const char* message)
 	{
@@ -750,10 +771,192 @@ namespace {
 			"a second wait after retirement consumption reports NotFound");
 	}
 
+	void TestSingleConsumerQuiescenceAndIndependentHandles()
+	{
+		Dispatcher dispatcher;
+		const auto blocking = MakeOutgoingProvider("a-blocking", 1, EvaluationCalculation, nullptr, &BlockingProvider);
+		const auto firstRegistration = dispatcher.RegisterOutgoing(&blocking);
+		Require(firstRegistration.added, "register Provider for concurrent quiescence claim");
+		{
+			std::scoped_lock lock{ g_gateMutex };
+			g_callbackEntered = false;
+			g_callbackRelease = false;
+		}
+		std::thread dispatchThread([&] { (void)dispatcher.DispatchOutgoing(MakeOutgoing()); });
+		{
+			std::unique_lock lock{ g_gateMutex };
+			g_gateCv.wait(lock, [] { return g_callbackEntered; });
+		}
+		Require(dispatcher.UnregisterOutgoing(firstRegistration.handle) == UnregisterStatus::Removed,
+			"retire the Provider while its callback is active");
+
+		QuiescenceClaimGate claimGate;
+		Testing::SetAfterQuiescenceClaimHook(&PauseAfterQuiescenceClaim, &claimGate);
+		std::atomic<QuiescenceStatus> firstStatus{ QuiescenceStatus::NotFound };
+		std::atomic<QuiescenceStatus> secondStatus{ QuiescenceStatus::NotFound };
+		std::thread firstWaiter([&] {
+			firstStatus.store(dispatcher.WaitOutgoingQuiescent(firstRegistration.handle), std::memory_order_release);
+		});
+		{
+			std::unique_lock lock{ claimGate.mutex };
+			claimGate.condition.wait(lock, [&] { return claimGate.entered; });
+		}
+		WaitUntilReturned secondDone;
+		std::atomic<bool> secondStarted{ false };
+		std::thread secondWaiter([&] {
+			secondStarted.store(true, std::memory_order_release);
+			secondStatus.store(dispatcher.WaitOutgoingQuiescent(firstRegistration.handle), std::memory_order_release);
+			{
+				std::scoped_lock lock{ secondDone.mutex };
+				secondDone.finished = true;
+			}
+			secondDone.condition.notify_all();
+		});
+		while (!secondStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+		bool secondReturnedBeforeRelease = false;
+		{
+			std::unique_lock lock{ secondDone.mutex };
+			secondReturnedBeforeRelease = secondDone.condition.wait_for(lock, std::chrono::seconds(2),
+				[&] { return secondDone.finished; });
+		}
+		{
+			std::scoped_lock lock{ claimGate.mutex };
+			claimGate.release = true;
+		}
+		claimGate.condition.notify_all();
+		{
+			std::scoped_lock lock{ g_gateMutex };
+			g_callbackRelease = true;
+		}
+		g_gateCv.notify_all();
+		firstWaiter.join();
+		secondWaiter.join();
+		dispatchThread.join();
+		Testing::SetAfterQuiescenceClaimHook(nullptr, nullptr);
+		Require(secondReturnedBeforeRelease && secondStatus.load(std::memory_order_acquire) ==
+			QuiescenceStatus::WaitInProgress,
+			"a competing waiter returns WaitInProgress without a second unload acknowledgement");
+		Require(firstStatus.load(std::memory_order_acquire) == QuiescenceStatus::Quiescent &&
+			dispatcher.WaitOutgoingQuiescent(firstRegistration.handle) == QuiescenceStatus::NotFound,
+			"only the single claim owner consumes the retired Handle and receives Quiescent");
+
+		Dispatcher independent;
+		const auto activeProvider = MakeOutgoingProvider("a-active", 1, EvaluationCalculation, nullptr, &BlockingProvider);
+		const auto idleProvider = MakeOutgoingProvider("b-idle", 2, EvaluationCalculation, nullptr, &CountProvider);
+		const auto active = independent.RegisterOutgoing(&activeProvider);
+		const auto idle = independent.RegisterOutgoing(&idleProvider);
+		{
+			std::scoped_lock lock{ g_gateMutex };
+			g_callbackEntered = false;
+			g_callbackRelease = false;
+		}
+		std::thread independentDispatch([&] { (void)independent.DispatchOutgoing(MakeOutgoing()); });
+		{
+			std::unique_lock lock{ g_gateMutex };
+			g_gateCv.wait(lock, [] { return g_callbackEntered; });
+		}
+		Require(independent.UnregisterOutgoing(active.handle) == UnregisterStatus::Removed &&
+			independent.UnregisterOutgoing(idle.handle) == UnregisterStatus::Removed,
+			"retire separate active and idle handles");
+		std::atomic<QuiescenceStatus> activeWaitStatus{ QuiescenceStatus::NotFound };
+		std::thread activeWaiter([&] {
+			activeWaitStatus.store(independent.WaitOutgoingQuiescent(active.handle), std::memory_order_release);
+		});
+		WaitUntilReturned idleDone;
+		std::atomic<QuiescenceStatus> idleWaitStatus{ QuiescenceStatus::NotFound };
+		std::thread idleWaiter([&] {
+			idleWaitStatus.store(independent.WaitOutgoingQuiescent(idle.handle), std::memory_order_release);
+			{
+				std::scoped_lock lock{ idleDone.mutex };
+				idleDone.finished = true;
+			}
+			idleDone.condition.notify_all();
+		});
+		bool idleFinishedBeforeActiveRelease = false;
+		{
+			std::unique_lock lock{ idleDone.mutex };
+			idleFinishedBeforeActiveRelease = idleDone.condition.wait_for(lock, std::chrono::seconds(2),
+				[&] { return idleDone.finished; });
+		}
+		{
+			std::scoped_lock lock{ g_gateMutex };
+			g_callbackRelease = true;
+		}
+		g_gateCv.notify_all();
+		activeWaiter.join();
+		idleWaiter.join();
+		independentDispatch.join();
+		Require(idleFinishedBeforeActiveRelease && idleWaitStatus.load(std::memory_order_acquire) ==
+			QuiescenceStatus::Quiescent && activeWaitStatus.load(std::memory_order_acquire) ==
+			QuiescenceStatus::Quiescent,
+			"waiting for one Entry does not hold the registry lock or block a different Handle");
+	}
+
+	struct CallbackWaitTargets {
+		Dispatcher* dispatcher{};
+		ProviderHandleV3 outgoing{};
+		ProviderHandleV3 incoming{};
+		QuiescenceStatus outgoingStatus{ QuiescenceStatus::NotFound };
+		QuiescenceStatus incomingStatus{ QuiescenceStatus::NotFound };
+	};
+
+	CallbackStatus WaitForOtherProvidersInsideCallback(void* opaque, const OutgoingCalculationContextV3*,
+		OutgoingResultV3* result)
+	{
+		auto& targets = *static_cast<CallbackWaitTargets*>(opaque);
+		targets.outgoingStatus = targets.dispatcher->WaitOutgoingQuiescent(targets.outgoing);
+		targets.incomingStatus = targets.dispatcher->WaitIncomingQuiescent(targets.incoming);
+		result->status = CallbackStatus::NoChange;
+		result->componentMask = ComponentNone;
+		result->multiplier = 1.0f;
+		return CallbackStatus::NoChange;
+	}
+
+	void TestCallbacksCannotWaitAcrossProvidersOrStages()
+	{
+		Dispatcher dispatcher;
+		const auto targetOutgoing = MakeOutgoingProvider("retired-outgoing", 1, EvaluationCalculation, nullptr,
+			&CountProvider);
+		const auto outgoingRegistration = dispatcher.RegisterOutgoing(&targetOutgoing);
+		const auto targetIncoming = MakeIncomingProvider("retired-incoming", 1);
+		const auto incomingRegistration = dispatcher.RegisterIncoming(&targetIncoming);
+		CallbackWaitTargets targets{ &dispatcher, outgoingRegistration.handle, incomingRegistration.handle };
+		const auto waiter = MakeOutgoingProvider("callback-waiter", 2, EvaluationCalculation, &targets,
+			&WaitForOtherProvidersInsideCallback);
+		const auto waiterRegistration = dispatcher.RegisterOutgoing(&waiter);
+		Require(dispatcher.UnregisterOutgoing(outgoingRegistration.handle) == UnregisterStatus::Removed &&
+			dispatcher.UnregisterIncoming(incomingRegistration.handle) == UnregisterStatus::Removed,
+			"retire both same-stage and cross-stage wait targets");
+		const auto result = dispatcher.DispatchOutgoing(MakeOutgoing());
+		Require(result.status == DispatchStatus::NoChange && targets.outgoingStatus == QuiescenceStatus::WouldDeadlock &&
+			targets.incomingStatus == QuiescenceStatus::WouldDeadlock,
+			"any callback in a Dispatcher is rejected from waiting on same-stage or cross-stage Providers");
+		Require(dispatcher.WaitOutgoingQuiescent(outgoingRegistration.handle) == QuiescenceStatus::Quiescent &&
+			dispatcher.WaitIncomingQuiescent(incomingRegistration.handle) == QuiescenceStatus::Quiescent,
+			"external owner can wait normally after the callback returns");
+		Require(dispatcher.UnregisterOutgoing(waiterRegistration.handle) == UnregisterStatus::Removed &&
+			dispatcher.WaitOutgoingQuiescent(waiterRegistration.handle) == QuiescenceStatus::Quiescent,
+			"callback-wait test Provider is also drained normally");
+	}
+
+	void TestQuiescenceWaitFailureIsRetryable()
+	{
+		Dispatcher dispatcher;
+		const auto provider = MakeOutgoingProvider("wait-failure", 1, EvaluationCalculation, nullptr, &CountProvider);
+		const auto registered = dispatcher.RegisterOutgoing(&provider);
+		Require(registered.added && dispatcher.UnregisterOutgoing(registered.handle) == UnregisterStatus::Removed,
+			"prepare retirement for controlled wait failure");
+		Testing::FailNextQuiescenceWait();
+		Require(dispatcher.WaitOutgoingQuiescent(registered.handle) == QuiescenceStatus::WaitFailure,
+			"injected Wait failure does not return an unload acknowledgement");
+		Require(dispatcher.WaitOutgoingQuiescent(registered.handle) == QuiescenceStatus::Quiescent,
+			"failed waiter releases its claim and leaves the retirement safely retryable");
+	}
+
 	void TestUnregisterFailureAtomicity()
 	{
 		for (const auto point : { UnregisterFailurePoint::SnapshotPreparation,
-			UnregisterFailurePoint::RetirementInsertion }) {
+			UnregisterFailurePoint::RetirementInsertion, UnregisterFailurePoint::RetiredRecordAllocation }) {
 			Dispatcher dispatcher;
 			ClearOrder();
 			Modifier observer{ "still-active", 1.0f, ComponentHealth | ComponentPhysical, false };
@@ -1012,6 +1215,9 @@ int main()
 	TestComponentPermissionsAndNoDamage();
 	TestCallbackRegistrationAndRecursion();
 	TestIdentityValidationAndSafeUnload();
+	TestSingleConsumerQuiescenceAndIndependentHandles();
+	TestCallbacksCannotWaitAcrossProvidersOrStages();
+	TestQuiescenceWaitFailureIsRetryable();
 	TestUnregisterFailureAtomicity();
 	TestGlobalHandleIdentityAcrossStages();
 	TestSelfUnregisterCannotWaitInsideCallback();

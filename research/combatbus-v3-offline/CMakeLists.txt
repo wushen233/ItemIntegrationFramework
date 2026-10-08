@@ -25,14 +25,15 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 	add_library(combatbus_iif_mock SHARED
 		src/CombatBusPrototype.cpp
 		src/CombatBusCABI.cpp)
-	target_include_directories(combatbus_iif_mock PRIVATE include)
-	target_compile_definitions(combatbus_iif_mock PRIVATE IIF_CB_HOST_EXPORTS)
+	target_include_directories(combatbus_iif_mock PRIVATE include tests)
+	target_compile_definitions(combatbus_iif_mock PRIVATE IIF_CB_HOST_EXPORTS IIF_CB_TEST_HOOKS)
 
 	add_library(combatbus_test_provider SHARED tests/MockProviderDll.cpp)
 	target_include_directories(combatbus_test_provider PRIVATE include)
 
 	add_executable(combatbus_cross_dll_host
 		tests/CrossDllHost.cpp
+		tests/MockHostTestHooks.h
 		tests/CAbiHeaderSmoke.c)
 	target_include_directories(combatbus_cross_dll_host PRIVATE include)
 

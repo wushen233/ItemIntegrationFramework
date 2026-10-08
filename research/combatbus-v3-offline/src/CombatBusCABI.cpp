@@ -1,5 +1,8 @@
 #include "CombatBusCABI.h"
 #include "CombatBusPrototype.h"
+#if defined(IIF_CB_TEST_HOOKS)
+#include "MockHostTestHooks.h"
+#endif
 
 #include <atomic>
 #include <condition_variable>
@@ -439,6 +442,7 @@ namespace {
 			return IIF_CB_STATUS_OK;
 		}
 		if (status == QuiescenceStatus::WouldDeadlock) return IIF_CB_STATUS_WOULD_DEADLOCK;
+		if (status == QuiescenceStatus::WaitInProgress) return IIF_CB_STATUS_WAIT_IN_PROGRESS;
 		if (status == QuiescenceStatus::WaitFailure) return IIF_CB_STATUS_WAIT_FAILURE;
 		return status == QuiescenceStatus::DispatcherClosed ? IIF_CB_STATUS_SHUTTING_DOWN : IIF_CB_STATUS_NOT_FOUND;
 		} catch (...) {
@@ -559,3 +563,16 @@ extern "C" IIF_CB_API std::uint32_t IIF_CB_CALL IIF_CombatBus_Shutdown(void)
 		return IIF_CB_STATUS_WAIT_FAILURE;
 	}
 }
+
+#if defined(IIF_CB_TEST_HOOKS)
+extern "C" IIF_CB_API void IIF_CB_CALL IIF_CombatBus_Test_SetQuiescenceClaimHook(
+	IIF_CB_TestQuiescenceClaimHook hook, void* context)
+{
+	Testing::SetAfterQuiescenceClaimHook(hook, context);
+}
+
+extern "C" IIF_CB_API void IIF_CB_CALL IIF_CombatBus_Test_FailNextQuiescenceWait(void)
+{
+	Testing::FailNextQuiescenceWait();
+}
+#endif

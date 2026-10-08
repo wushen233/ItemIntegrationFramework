@@ -18,11 +18,18 @@ namespace {
 
 	thread_local const void* g_dispatchStack[32]{};
 	thread_local std::uint32_t g_dispatchDepth = 0;
-	thread_local const void* g_callbackStack[64]{};
+	struct CallbackFrame {
+		const void* dispatcher{};
+		const void* entry{};
+	};
+	thread_local CallbackFrame g_callbackStack[64]{};
 	thread_local std::uint32_t g_callbackDepth = 0;
 	thread_local const void* g_apiCallStack[64]{};
 	thread_local std::uint32_t g_apiCallDepth = 0;
 	std::atomic<UnregisterFailurePoint> g_unregisterFailurePoint{ UnregisterFailurePoint::None };
+	std::atomic<Testing::QuiescenceClaimHook> g_quiescenceClaimHook{};
+	std::atomic<void*> g_quiescenceClaimContext{};
+	std::atomic<bool> g_failNextQuiescenceWait{};
 
 	[[nodiscard]] bool ConsumeUnregisterFailure(UnregisterFailurePoint point) noexcept
 	{
@@ -56,15 +63,15 @@ namespace {
 
 	class CallbackGuard final {
 	public:
-		explicit CallbackGuard(const void* entry) noexcept
+		CallbackGuard(const void* dispatcher, const void* entry) noexcept
 		{
 			if (g_callbackDepth >= std::size(g_callbackStack)) return;
-			g_callbackStack[g_callbackDepth++] = entry;
+			g_callbackStack[g_callbackDepth++] = { dispatcher, entry };
 			_entered = true;
 		}
 		~CallbackGuard()
 		{
-			if (_entered) g_callbackStack[--g_callbackDepth] = nullptr;
+			if (_entered) g_callbackStack[--g_callbackDepth] = {};
 		}
 		[[nodiscard]] bool Entered() const noexcept { return _entered; }
 
@@ -72,12 +79,18 @@ namespace {
 		bool _entered{ false };
 	};
 
-	[[nodiscard]] bool IsActiveCallback(const void* entry) noexcept
+	[[nodiscard]] bool IsActiveCallbackOnDispatcher(const void* dispatcher) noexcept
 	{
 		for (std::uint32_t index = 0; index < g_callbackDepth; ++index) {
-			if (g_callbackStack[index] == entry) return true;
+			if (g_callbackStack[index].dispatcher == dispatcher) return true;
 		}
 		return false;
+	}
+
+	void RunAfterQuiescenceClaimHook() noexcept
+	{
+		const auto hook = g_quiescenceClaimHook.load(std::memory_order_acquire);
+		if (hook) hook(g_quiescenceClaimContext.load(std::memory_order_relaxed));
 	}
 
 	[[nodiscard]] bool IsActiveApiCall(const void* owner) noexcept
@@ -402,6 +415,12 @@ namespace {
 			}
 		};
 
+		struct RetiredRecord {
+			explicit RetiredRecord(std::shared_ptr<Entry> retiredEntry) noexcept : entry(std::move(retiredEntry)) {}
+			std::shared_ptr<Entry> entry;
+			std::atomic<bool> waitClaimed{};
+		};
+
 		using ProviderList = std::vector<std::shared_ptr<Entry>>;
 		using Snapshot = std::shared_ptr<const ProviderList>;
 
@@ -432,7 +451,9 @@ namespace {
 			if (std::any_of(current->begin(), current->end(), [&](const auto& item) { return item->id == id; })) {
 				return { RegistrationStatus::Duplicate, {}, false };
 			}
-			if (std::any_of(_retired.begin(), _retired.end(), [&](const auto& item) { return item.second->id == id; })) {
+			if (std::any_of(_retired.begin(), _retired.end(), [&](const auto& item) {
+					return item.second->entry->id == id;
+				})) {
 				return { RegistrationStatus::Duplicate, {}, false };
 			}
 			std::shared_ptr<Entry> nextEntry;
@@ -484,7 +505,11 @@ namespace {
 				if (ConsumeUnregisterFailure(UnregisterFailurePoint::RetirementInsertion)) {
 					return UnregisterStatus::AllocationFailure;
 				}
-				const auto [unused, inserted] = _retired.emplace(handle.value, entry);
+				if (ConsumeUnregisterFailure(UnregisterFailurePoint::RetiredRecordAllocation)) {
+					return UnregisterStatus::AllocationFailure;
+				}
+				auto retired = std::make_shared<RetiredRecord>(entry);
+				const auto [unused, inserted] = _retired.emplace(handle.value, std::move(retired));
 				(void)unused;
 				if (!inserted) return UnregisterStatus::AllocationFailure;
 			} catch (...) {
@@ -502,27 +527,41 @@ namespace {
 
 		QuiescenceStatus WaitQuiescent(ProviderHandleV3 handle)
 		{
-			std::shared_ptr<Entry> entry;
+			std::shared_ptr<RetiredRecord> record;
 			{
 				std::scoped_lock lock{ _writeMutex };
 				const auto found = _retired.find(handle.value);
 				if (found == _retired.end()) return QuiescenceStatus::NotFound;
-				entry = found->second;
+				record = found->second;
 			}
-			if (IsActiveCallback(entry.get())) return QuiescenceStatus::WouldDeadlock;
-			try {
-				entry->Wait();
-			} catch (...) {
+			auto expected = false;
+			if (!record->waitClaimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+				std::memory_order_acquire)) return QuiescenceStatus::WaitInProgress;
+
+			RunAfterQuiescenceClaimHook();
+			if (g_failNextQuiescenceWait.exchange(false, std::memory_order_acq_rel)) {
+				record->waitClaimed.store(false, std::memory_order_release);
 				return QuiescenceStatus::WaitFailure;
 			}
-			{
+			try {
+				record->entry->Wait();
+			} catch (...) {
+				record->waitClaimed.store(false, std::memory_order_release);
+				return QuiescenceStatus::WaitFailure;
+			}
+			try {
 				std::scoped_lock lock{ _writeMutex };
-				_retired.erase(handle.value);
+				const auto found = _retired.find(handle.value);
+				if (found == _retired.end() || found->second != record) return QuiescenceStatus::NotFound;
+				_retired.erase(found);
+			} catch (...) {
+				record->waitClaimed.store(false, std::memory_order_release);
+				return QuiescenceStatus::WaitFailure;
 			}
 			return QuiescenceStatus::Quiescent;
 		}
 
-		Dispatch DispatchContext(const Context& context) const noexcept
+		Dispatch DispatchContext(const Context& context, const void* dispatcher) const noexcept
 		{
 			if (!Traits::ValidateContext(context)) return Traits::Identity(
 				static_cast<std::uint32_t>(DispatchStatus::InvalidContext), context);
@@ -545,7 +584,7 @@ namespace {
 				for (const auto& entry : *providers) {
 					if (!Traits::Matches(DescriptorView(*entry), context)) continue;
 					if (!entry->TryEnter()) continue;
-					CallbackGuard callbackGuard{ entry.get() };
+					CallbackGuard callbackGuard{ dispatcher, entry.get() };
 					if (!callbackGuard.Entered()) {
 						entry->Leave();
 						return Traits::Identity(static_cast<std::uint32_t>(DispatchStatus::RecursiveDispatch), context);
@@ -589,7 +628,7 @@ namespace {
 				bool applied = false;
 				for (const auto& entry : *providers) {
 					if (!entry->TryEnter()) continue;
-					CallbackGuard callbackGuard{ entry.get() };
+					CallbackGuard callbackGuard{ dispatcher, entry.get() };
 					if (!callbackGuard.Entered()) {
 						entry->Leave();
 						return Traits::Identity(static_cast<std::uint32_t>(DispatchStatus::RecursiveDispatch), context);
@@ -644,7 +683,7 @@ namespace {
 
 		mutable std::mutex _writeMutex;
 		std::atomic<Snapshot> _snapshot;
-		std::map<std::uint64_t, std::shared_ptr<Entry>> _retired;
+		std::map<std::uint64_t, std::shared_ptr<RetiredRecord>> _retired;
 	};
 }
 
@@ -674,6 +713,17 @@ struct Dispatcher::Impl {
 void Testing::FailNextUnregisterAt(UnregisterFailurePoint point) noexcept
 {
 	g_unregisterFailurePoint.store(point, std::memory_order_release);
+}
+
+void Testing::SetAfterQuiescenceClaimHook(QuiescenceClaimHook hook, void* context) noexcept
+{
+	g_quiescenceClaimContext.store(context, std::memory_order_relaxed);
+	g_quiescenceClaimHook.store(hook, std::memory_order_release);
+}
+
+void Testing::FailNextQuiescenceWait() noexcept
+{
+	g_failNextQuiescenceWait.store(true, std::memory_order_release);
 }
 
 Dispatcher::Dispatcher() : _impl(std::make_unique<Impl>()) {}
@@ -736,24 +786,26 @@ QuiescenceStatus Dispatcher::WaitOutgoingQuiescent(ProviderHandleV3 handle)
 {
 	ApiCallGuard call{ _impl->calls, _impl.get() };
 	if (!call.Entered()) return QuiescenceStatus::DispatcherClosed;
+	if (IsActiveCallbackOnDispatcher(_impl.get())) return QuiescenceStatus::WouldDeadlock;
 	return _impl->outgoing.WaitQuiescent(handle);
 }
 QuiescenceStatus Dispatcher::WaitIncomingQuiescent(ProviderHandleV3 handle)
 {
 	ApiCallGuard call{ _impl->calls, _impl.get() };
 	if (!call.Entered()) return QuiescenceStatus::DispatcherClosed;
+	if (IsActiveCallbackOnDispatcher(_impl.get())) return QuiescenceStatus::WouldDeadlock;
 	return _impl->incoming.WaitQuiescent(handle);
 }
 OutgoingDispatchV3 Dispatcher::DispatchOutgoing(const OutgoingCalculationContextV3& context) const noexcept
 {
 	ApiCallGuard call{ _impl->calls, _impl.get() };
 	if (!call.Entered()) return OutgoingIdentity(DispatchStatus::DispatcherClosed, context.damage);
-	return _impl->outgoing.DispatchContext(context);
+	return _impl->outgoing.DispatchContext(context, _impl.get());
 }
 IncomingDispatchV3 Dispatcher::DispatchIncoming(const IncomingHealthContextV3& context) const noexcept
 {
 	ApiCallGuard call{ _impl->calls, _impl.get() };
 	if (!call.Entered()) return IncomingIdentity(DispatchStatus::DispatcherClosed, context.healthDamage);
-	return _impl->incoming.DispatchContext(context);
+	return _impl->incoming.DispatchContext(context, _impl.get());
 }
 }

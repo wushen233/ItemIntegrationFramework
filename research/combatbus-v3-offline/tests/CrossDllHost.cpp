@@ -1,4 +1,5 @@
 #include "CombatBusCABI.h"
+#include "MockHostTestHooks.h"
 
 #include <windows.h>
 
@@ -26,6 +27,40 @@ namespace {
 	using SetShutdownFn = void (IIF_CB_CALL *)(IIF_CB_ShutdownFn);
 	using TriggerShutdownFn = void (IIF_CB_CALL *)();
 	using CallbackShutdownStatusFn = std::uint32_t (IIF_CB_CALL *)();
+	using SetQuiescenceHookFn = void (IIF_CB_CALL *)(IIF_CB_TestQuiescenceClaimHook, void*);
+	using FailNextWaitFn = void (IIF_CB_CALL *)();
+
+	struct WaitTargetState {
+		const IIF_CB_InterfaceV3* interfaceV3{};
+		void* registry{};
+		IIF_CB_ProviderHandleV3 handle{};
+		std::uint32_t stage{};
+		std::atomic<std::uint32_t> status{ IIF_CB_STATUS_INTERNAL_ERROR };
+	};
+
+	struct ClaimGate {
+		HANDLE entered{};
+		HANDLE release{};
+	};
+
+	void IIF_CB_CALL PauseAfterClaim(void* opaque) noexcept
+	{
+		auto& gate = *static_cast<ClaimGate*>(opaque);
+		SetEvent(gate.entered);
+		(void)WaitForSingleObject(gate.release, INFINITE);
+	}
+
+	std::uint32_t IIF_CB_CALL WaitForTargetFromProvider(void* opaque,
+		const IIF_CB_OutgoingContextV3*, IIF_CB_OutgoingResultV3* result)
+	{
+		auto& target = *static_cast<WaitTargetState*>(opaque);
+		target.status.store(target.interfaceV3->wait_provider_quiescent(target.registry, target.handle,
+			target.stage), std::memory_order_release);
+		result->status = IIF_CB_CALLBACK_NO_CHANGE;
+		result->component_mask = 0;
+		result->multiplier = 1.0f;
+		return IIF_CB_CALLBACK_NO_CHANGE;
+	}
 
 	int failures{};
 
@@ -155,13 +190,16 @@ namespace {
 		const auto triggerShutdown = Resolve<TriggerShutdownFn>(providerModule, "TestProvider_TriggerShutdown");
 		const auto getCallbackShutdownStatus = Resolve<CallbackShutdownStatusFn>(providerModule,
 			"TestProvider_GetCallbackShutdownStatus");
+		const auto setQuiescenceHook = Resolve<SetQuiescenceHookFn>(hostModule,
+			"IIF_CombatBus_Test_SetQuiescenceClaimHook");
+		const auto failNextWait = Resolve<FailNextWaitFn>(hostModule, "IIF_CombatBus_Test_FailNextQuiescenceWait");
 		Check(getWRF && getCSF && getPAS && getInvalid && resetProvider && blockWRF && waitWRFEntered &&
 			releaseWRF && getCounter && getObserved && getOrder && setShutdown && triggerShutdown &&
-			getCallbackShutdownStatus,
+			getCallbackShutdownStatus && setQuiescenceHook && failNextWait,
 			"GetProcAddress resolved Provider DLL descriptor and synchronization functions");
 		if (!(getWRF && getCSF && getPAS && getInvalid && resetProvider && blockWRF && waitWRFEntered &&
 			releaseWRF && getCounter && getObserved && getOrder && setShutdown && triggerShutdown &&
-			getCallbackShutdownStatus)) {
+			getCallbackShutdownStatus && setQuiescenceHook && failNextWait)) {
 			(void)shutdown();
 			FreeLibrary(providerModule);
 			FreeLibrary(hostModule);
@@ -265,10 +303,16 @@ namespace {
 			Near(outgoingResult.damage.health_damage, 100.0f),
 			"invalid cross-DLL callback status fails closed and restores the original numeric snapshot");
 		Check(interfaceV3.unregister_provider(interfaceV3.registry, invalidProviderRegistration.handle,
-			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK &&
-			interfaceV3.wait_provider_quiescent(interfaceV3.registry, invalidProviderRegistration.handle,
-				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
-			"invalid-result Provider can still be safely unregistered and drained");
+			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
+			"invalid-result Provider can be unregistered before testing a failed wait");
+		failNextWait();
+		const auto injectedWaitFailure = interfaceV3.wait_provider_quiescent(interfaceV3.registry,
+			invalidProviderRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION);
+		Check(injectedWaitFailure == IIF_CB_STATUS_WAIT_FAILURE && GetModuleHandleW(providerPath) == providerModule,
+			"failed WaitQuiescent does not authorize Provider FreeLibrary");
+		Check(interfaceV3.wait_provider_quiescent(interfaceV3.registry, invalidProviderRegistration.handle,
+			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
+			"a failed C ABI wait leaves the retirement record available for a successful retry");
 
 		blockWRF();
 		std::atomic<std::uint32_t> activeDispatchStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
@@ -283,9 +327,16 @@ namespace {
 		Check(interfaceV3.unregister_provider(interfaceV3.registry, wrfRegistration.handle,
 			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
 			"unregister while callback is active returns Removed but not unload permission");
+		HANDLE claimEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		HANDLE claimRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE waitStarted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		HANDLE waitFinished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		HANDLE secondWaitStarted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		HANDLE secondWaitFinished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		std::atomic<std::uint32_t> waitStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
+		std::atomic<std::uint32_t> secondWaitStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
+		ClaimGate claimGate{ claimEntered, claimRelease };
+		setQuiescenceHook(&PauseAfterClaim, &claimGate);
 		std::thread waitThread([&] {
 			SetEvent(waitStarted);
 			waitStatus.store(interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
@@ -294,16 +345,36 @@ namespace {
 		});
 		Check(WaitForSingleObject(waitStarted, 5000) == WAIT_OBJECT_0,
 			"quiescence waiter reached its controlled start barrier");
+		Check(WaitForSingleObject(claimEntered, 5000) == WAIT_OBJECT_0,
+			"first waiter owns the retirement claim before the competing call begins");
+		std::thread secondWaitThread([&] {
+			SetEvent(secondWaitStarted);
+			secondWaitStatus.store(interfaceV3.wait_provider_quiescent(interfaceV3.registry,
+				wrfRegistration.handle, IIF_CB_STAGE_OUTGOING_CALCULATION), std::memory_order_release);
+			SetEvent(secondWaitFinished);
+		});
+		Check(WaitForSingleObject(secondWaitStarted, 5000) == WAIT_OBJECT_0,
+			"competing quiescence waiter reaches its barrier");
+		Check(WaitForSingleObject(secondWaitFinished, 2000) == WAIT_OBJECT_0 &&
+			secondWaitStatus.load(std::memory_order_acquire) == IIF_CB_STATUS_WAIT_IN_PROGRESS,
+			"second DLL caller is denied duplicate unload authorization while first owns the claim");
 		Check(WaitForSingleObject(waitFinished, 100) == WAIT_TIMEOUT,
-			"WaitQuiescent does not finish while the Provider callback is still running");
+			"claim owner cannot finish while the Provider callback is still running");
 		Check(getCounter(1) >= 3, "active callback remains accounted before quiescence");
+		setQuiescenceHook(nullptr, nullptr);
+		SetEvent(claimRelease);
 		releaseWRF();
 		callbackThread.join();
 		waitThread.join();
+		secondWaitThread.join();
+		CloseHandle(claimEntered);
+		CloseHandle(claimRelease);
 		CloseHandle(waitStarted);
 		CloseHandle(waitFinished);
+		CloseHandle(secondWaitStarted);
+		CloseHandle(secondWaitFinished);
 		Check(waitStatus.load(std::memory_order_acquire) == IIF_CB_STATUS_OK,
-			"WaitQuiescent returns success after callback completion");
+			"only the claim owner receives success after callback completion");
 		const auto wrfCallsAtQuiescence = getCounter(1);
 		outgoing = MakeOutgoing();
 		outgoingResult = MakeOutgoingResult();
@@ -315,15 +386,41 @@ namespace {
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, wrfRegistration.handle,
 				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_NOT_FOUND,
 			"repeated unregister and wait do not recreate unload permission");
+		Check(interfaceV3.unregister_provider(interfaceV3.registry, pasRegistration.handle,
+			IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_OK,
+			"retire PAS before exercising callback-originated cross-stage Wait");
+		WaitTargetState waitIncomingState{ &interfaceV3, interfaceV3.registry, pasRegistration.handle,
+			IIF_CB_STAGE_INCOMING_HEALTH };
+		IIF_CB_OutgoingProviderV3 callbackWaitProvider{};
+		callbackWaitProvider.struct_size = sizeof(callbackWaitProvider);
+		callbackWaitProvider.version = IIF_CB_VERSION_3;
+		callbackWaitProvider.provider_id = "callback-wait-cross-stage";
+		callbackWaitProvider.priority = 300;
+		callbackWaitProvider.evaluation_mask = IIF_CB_EVALUATION_CALCULATION;
+		callbackWaitProvider.provider_context = &waitIncomingState;
+		callbackWaitProvider.callback = &WaitForTargetFromProvider;
+		IIF_CB_RegistrationV3 callbackWaitRegistration{ sizeof(IIF_CB_RegistrationV3), IIF_CB_VERSION_3, 0, 0, { 0 } };
+		Check(interfaceV3.register_outgoing(interfaceV3.registry, &callbackWaitProvider,
+			&callbackWaitRegistration) == IIF_CB_STATUS_OK,
+			"register a Host-owned Provider callback for cross-stage wait safety");
+		outgoing = MakeOutgoing();
+		outgoingResult = MakeOutgoingResult();
+		Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) == IIF_CB_STATUS_OK &&
+			waitIncomingState.status.load(std::memory_order_acquire) == IIF_CB_STATUS_WOULD_DEADLOCK,
+			"Outgoing callback cannot wait on an Incoming Provider in the same Dispatcher");
+		Check(interfaceV3.wait_provider_quiescent(interfaceV3.registry, pasRegistration.handle,
+			IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_OK,
+			"external owner can drain PAS after the cross-stage callback has returned");
+		Check(interfaceV3.unregister_provider(interfaceV3.registry, callbackWaitRegistration.handle,
+			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK &&
+			interfaceV3.wait_provider_quiescent(interfaceV3.registry, callbackWaitRegistration.handle,
+				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
+			"Host-owned callback Provider is also safely quiesced");
 		Check(interfaceV3.unregister_provider(interfaceV3.registry, csfRegistration.handle,
 			IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK &&
 			interfaceV3.wait_provider_quiescent(interfaceV3.registry, csfRegistration.handle,
-				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK &&
-			interfaceV3.unregister_provider(interfaceV3.registry, pasRegistration.handle,
-				IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_OK &&
-			interfaceV3.wait_provider_quiescent(interfaceV3.registry, pasRegistration.handle,
-				IIF_CB_STAGE_INCOMING_HEALTH) == IIF_CB_STATUS_OK,
-			"CSF and PAS each require successful stage-correct quiescence before unload");
+				IIF_CB_STAGE_OUTGOING_CALCULATION) == IIF_CB_STATUS_OK,
+			"CSF requires successful stage-correct quiescence before unload");
 		Check(FreeLibrary(providerModule) != 0,
 			"Provider DLL unload succeeds only after all callback code is quiescent");
 		outgoingResult = MakeOutgoingResult();
@@ -354,6 +451,7 @@ namespace {
 				(void)interfaceV3.dispatch_outgoing(interfaceV3.registry, &context, &result);
 			});
 			Check(waitWRFEntered(5000) == 1, "Host shutdown test callback enters Provider DLL");
+			const auto callbacksBeforeShutdownClose = getCounter(1);
 			std::atomic<std::uint32_t> shutdownStatus{ IIF_CB_STATUS_INTERNAL_ERROR };
 			std::atomic<bool> shutdownDone{ false };
 			std::thread shutdownThread([&] {
@@ -376,11 +474,13 @@ namespace {
 			Check(interfaceV3.dispatch_outgoing(interfaceV3.registry, &outgoing, &outgoingResult) ==
 				IIF_CB_STATUS_SHUTTING_DOWN && outgoingResult.status == IIF_CB_DISPATCH_CLOSED,
 				"previously copied Interface rejects calls during Host shutdown");
+			Check(getCounter(1) == callbacksBeforeShutdownClose,
+				"closed Host gate prevents another callback from entering the Provider DLL");
 			releaseWRF();
 			shutdownCaller.join();
 			shutdownThread.join();
 		Check(shutdownStatus.load(std::memory_order_acquire) == IIF_CB_STATUS_OK &&
-			shutdownDone.load(std::memory_order_acquire),
+			shutdownDone.load(std::memory_order_acquire) && getCounter(1) == callbacksBeforeShutdownClose,
 			"Host Shutdown completes after its active callback and API call drain");
 		Check(shutdown() == IIF_CB_STATUS_OK,
 			"repeated exported Host Shutdown remains idempotent");

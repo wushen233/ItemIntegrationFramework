@@ -36,6 +36,8 @@ extern "C" {
 #define IIF_CB_STATUS_WOULD_DEADLOCK UINT32_C(10)
 #define IIF_CB_STATUS_WAIT_FAILURE UINT32_C(11)
 #define IIF_CB_STATUS_INTERNAL_ERROR UINT32_C(12)
+/* Another WaitQuiescent call owns the single-consumer claim. */
+#define IIF_CB_STATUS_WAIT_IN_PROGRESS UINT32_C(13)
 
 #define IIF_CB_CALLBACK_NO_CHANGE UINT32_C(0)
 #define IIF_CB_CALLBACK_APPLY UINT32_C(1)

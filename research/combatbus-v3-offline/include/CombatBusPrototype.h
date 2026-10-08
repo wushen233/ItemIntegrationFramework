@@ -15,9 +15,8 @@
 // Offline ABI candidate only. It models provider contracts and does not mirror
 // Fallout 4's HitData layout. Opaque engine handles are borrowed for one callback.
 namespace IIF::CombatBus::PrototypeV3 {
-	// Versioned research candidate only. The target ABI is Windows x64; callbacks
-	// use __cdecl (the unified Win64 calling convention). No exported DLL entrypoint
-	// or cross-module ABI has been validated by these offline fixtures.
+	// Versioned research candidate only. The separate C ABI candidate and mock
+	// Windows DLL boundary have offline fixtures; neither is a production ABI.
 	inline constexpr std::uint32_t kInterfaceVersion = 3;
 	inline constexpr std::uint32_t kMaxProviderIdLength = 127;
 	inline constexpr float kMaxDamageValue = 100000000.0f;
@@ -49,11 +48,12 @@ namespace IIF::CombatBus::PrototypeV3 {
 	};
 	enum class RegistrationStatus : Enum32 { Added = 0, Duplicate = 1, InvalidDescriptor = 2, InvalidId = 3, AllocationFailure = 4, HandleExhausted = 5, DispatcherClosed = 6 };
 	enum class UnregisterStatus : Enum32 { Removed = 0, NotFound = 1, AllocationFailure = 2, DispatcherClosed = 3 };
-	enum class QuiescenceStatus : Enum32 { Quiescent = 0, NotFound = 1, WouldDeadlock = 2, WaitFailure = 3, DispatcherClosed = 4 };
+	// WaitInProgress means another WaitQuiescent call owns the retirement claim; it is not unload permission.
+	enum class QuiescenceStatus : Enum32 { Quiescent = 0, NotFound = 1, WouldDeadlock = 2, WaitFailure = 3, DispatcherClosed = 4, WaitInProgress = 5 };
 	enum class ShutdownStatus : Enum32 { Complete = 0, WouldDeadlock = 1, WaitFailure = 2 };
 	// InterfaceV3 unregister/wait routing values; Provider handles are Dispatcher-global.
 	enum class ProviderStage : Enum32 { OutgoingCalculation = 1, IncomingHealthProcessing = 2 };
-	enum class UnregisterFailurePoint : Enum32 { None = 0, SnapshotPreparation = 1, RetirementInsertion = 2 };
+	enum class UnregisterFailurePoint : Enum32 { None = 0, SnapshotPreparation = 1, RetirementInsertion = 2, RetiredRecordAllocation = 3 };
 
 #if defined(_WIN32)
 #define IIF_COMBATBUS_CALL __cdecl
@@ -218,6 +218,10 @@ namespace IIF::CombatBus::PrototypeV3 {
 	namespace Testing {
 		// Deterministic failure injection for the offline Unregister fixtures only.
 		void FailNextUnregisterAt(UnregisterFailurePoint point) noexcept;
+		using QuiescenceClaimHook = void (*)(void*) noexcept;
+		// Isolated-fixture controls; these are not part of the C ABI candidate.
+		void SetAfterQuiescenceClaimHook(QuiescenceClaimHook hook, void* context) noexcept;
+		void FailNextQuiescenceWait() noexcept;
 	}
 
 	// Explicit ABI layout checks; enum storage is fixed by enum class : uint32_t.
