@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <iostream>
 #include <thread>
 
@@ -82,6 +83,16 @@ namespace {
 		return function;
 	}
 
+	template <class T>
+	bool ResolveRequired(HMODULE module, const char* name, T& function, const char*& missingExport)
+	{
+		function = Resolve<T>(module, name);
+		if (function) return true;
+		missingExport = name;
+		std::cerr << "ERROR: missing required export '" << name << "'\n";
+		return false;
+	}
+
 	IIF_CB_OutgoingContextV3 MakeOutgoing()
 	{
 		IIF_CB_OutgoingContextV3 context{};
@@ -137,16 +148,33 @@ namespace {
 		return std::fabs(left - right) < 0.0001f;
 	}
 
-	bool Run(const wchar_t* hostPath, const wchar_t* providerPath)
+	bool ModulePathMatches(HMODULE module, const wchar_t* expectedPath)
+	{
+		wchar_t actualPath[MAX_PATH]{};
+		wchar_t fullExpectedPath[MAX_PATH]{};
+		const DWORD actualLength = GetModuleFileNameW(module, actualPath, MAX_PATH);
+		const DWORD expectedLength = GetFullPathNameW(expectedPath, MAX_PATH,
+			fullExpectedPath, nullptr);
+		return actualLength != 0 && actualLength < MAX_PATH && expectedLength != 0 &&
+			expectedLength < MAX_PATH && _wcsicmp(actualPath, fullExpectedPath) == 0;
+	}
+
+	bool Run(const wchar_t* hostPath, const wchar_t* providerPath,
+		const wchar_t* reloadProviderPath = nullptr, const wchar_t* expectedMissingReloadExport = nullptr)
 	{
 		Check(CAbiHeaderSmoke() == 1, "C compiler accepted the shared public ABI header and Win64 layout assertions");
 		HMODULE hostModule = LoadLibraryW(hostPath);
 		Check(hostModule != nullptr, "LoadLibrary loaded the simulated IIF Host DLL");
 		if (!hostModule) return false;
-		const auto query = Resolve<QueryFn>(hostModule, "IIF_CombatBus_QueryInterface");
-		const auto shutdown = Resolve<ShutdownFn>(hostModule, "IIF_CombatBus_Shutdown");
-		Check(query && shutdown, "GetProcAddress resolved explicit C ABI exports");
-		if (!query || !shutdown) { FreeLibrary(hostModule); return false; }
+		Check(ModulePathMatches(hostModule, hostPath), "Host HMODULE resolves to the requested absolute DLL path");
+		QueryFn query{};
+		ShutdownFn shutdown{};
+		const char* missingHostExport{};
+		if (!ResolveRequired(hostModule, "IIF_CombatBus_QueryInterface", query, missingHostExport) ||
+			!ResolveRequired(hostModule, "IIF_CombatBus_Shutdown", shutdown, missingHostExport)) {
+			FreeLibrary(hostModule);
+			return false;
+		}
 
 		IIF_CB_InterfaceV3 interfaceV3{};
 		interfaceV3.struct_size = sizeof(interfaceV3);
@@ -175,31 +203,47 @@ namespace {
 			FreeLibrary(hostModule);
 			return false;
 		}
-		GetOutgoingFn getWRF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetWRF");
-		auto getCSF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetCSF");
-		auto getPAS = Resolve<GetIncomingFn>(providerModule, "TestProvider_GetPAS");
-		auto getInvalid = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetInvalid");
-		ResetFn resetProvider = Resolve<ResetFn>(providerModule, "TestProvider_Reset");
-		BlockFn blockWRF = Resolve<BlockFn>(providerModule, "TestProvider_BlockWRF");
-		WaitEnteredFn waitWRFEntered = Resolve<WaitEnteredFn>(providerModule, "TestProvider_WaitWRFEntered");
-		ReleaseFn releaseWRF = Resolve<ReleaseFn>(providerModule, "TestProvider_ReleaseWRF");
-		auto getCounter = Resolve<CounterFn>(providerModule, "TestProvider_GetCounter");
-		auto getObserved = Resolve<ObservedFn>(providerModule, "TestProvider_GetObserved");
-		auto getOrder = Resolve<OrderFn>(providerModule, "TestProvider_GetOrder");
-		auto setShutdown = Resolve<SetShutdownFn>(providerModule, "TestProvider_SetShutdown");
-		auto triggerShutdown = Resolve<TriggerShutdownFn>(providerModule, "TestProvider_TriggerShutdown");
-		auto getCallbackShutdownStatus = Resolve<CallbackShutdownStatusFn>(providerModule,
-			"TestProvider_GetCallbackShutdownStatus");
-		const auto setQuiescenceHook = Resolve<SetQuiescenceHookFn>(hostModule,
-			"IIF_CombatBus_Test_SetQuiescenceClaimHook");
-		const auto failNextWait = Resolve<FailNextWaitFn>(hostModule, "IIF_CombatBus_Test_FailNextQuiescenceWait");
-		Check(getWRF && getCSF && getPAS && getInvalid && resetProvider && blockWRF && waitWRFEntered &&
-			releaseWRF && getCounter && getObserved && getOrder && setShutdown && triggerShutdown &&
-			getCallbackShutdownStatus && setQuiescenceHook && failNextWait,
-			"GetProcAddress resolved Provider DLL descriptor and synchronization functions");
-		if (!(getWRF && getCSF && getPAS && getInvalid && resetProvider && blockWRF && waitWRFEntered &&
-			releaseWRF && getCounter && getObserved && getOrder && setShutdown && triggerShutdown &&
-			getCallbackShutdownStatus && setQuiescenceHook && failNextWait)) {
+		Check(ModulePathMatches(providerModule, providerPath),
+			"initial Provider HMODULE resolves to the requested absolute DLL path");
+		GetOutgoingFn getWRF{};
+		GetOutgoingFn getCSF{};
+		GetIncomingFn getPAS{};
+		GetOutgoingFn getInvalid{};
+		ResetFn resetProvider{};
+		BlockFn blockWRF{};
+		WaitEnteredFn waitWRFEntered{};
+		ReleaseFn releaseWRF{};
+		CounterFn getCounter{};
+		ObservedFn getObserved{};
+		OrderFn getOrder{};
+		SetShutdownFn setShutdown{};
+		TriggerShutdownFn triggerShutdown{};
+		CallbackShutdownStatusFn getCallbackShutdownStatus{};
+		const char* missingProviderExport{};
+		const bool initialProviderExportsResolved =
+			ResolveRequired(providerModule, "TestProvider_GetWRF", getWRF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetCSF", getCSF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetPAS", getPAS, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetInvalid", getInvalid, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetCounter", getCounter, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetObserved", getObserved, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetOrder", getOrder, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_SetShutdown", setShutdown, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_TriggerShutdown", triggerShutdown, missingProviderExport) &&
+			ResolveRequired(providerModule, "TestProvider_GetCallbackShutdownStatus",
+				getCallbackShutdownStatus, missingProviderExport);
+		SetQuiescenceHookFn setQuiescenceHook{};
+		FailNextWaitFn failNextWait{};
+		const bool hostTestHooksResolved =
+			ResolveRequired(hostModule, "IIF_CombatBus_Test_SetQuiescenceClaimHook",
+				setQuiescenceHook, missingHostExport) &&
+			ResolveRequired(hostModule, "IIF_CombatBus_Test_FailNextQuiescenceWait",
+				failNextWait, missingHostExport);
+		if (!initialProviderExportsResolved || !hostTestHooksResolved) {
 			(void)shutdown();
 			FreeLibrary(providerModule);
 			FreeLibrary(hostModule);
@@ -429,32 +473,60 @@ namespace {
 			outgoingResult.status == IIF_CB_DISPATCH_NO_PROVIDERS,
 			"Host dispatch after Provider FreeLibrary has no stale callback target");
 
-		providerModule = LoadLibraryW(providerPath);
+		providerModule = LoadLibraryW(reloadProviderPath ? reloadProviderPath : providerPath);
 		Check(providerModule != nullptr, "Provider DLL reloads for Host Shutdown drain test");
 		if (providerModule) {
+			Check(ModulePathMatches(providerModule, reloadProviderPath ? reloadProviderPath : providerPath),
+				"reloaded Provider HMODULE resolves to the requested absolute DLL path");
 			// Every export address belongs to the loaded module instance. The first
 			// Provider instance was unloaded above, so refresh the entire export set;
 			// retaining even a test-only function pointer (notably GetCounter) can call
 			// into provider.dll_unloaded if the loader maps the new instance elsewhere.
-			getWRF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetWRF");
-			getCSF = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetCSF");
-			getPAS = Resolve<GetIncomingFn>(providerModule, "TestProvider_GetPAS");
-			getInvalid = Resolve<GetOutgoingFn>(providerModule, "TestProvider_GetInvalid");
-			blockWRF = Resolve<BlockFn>(providerModule, "TestProvider_BlockWRF");
-			waitWRFEntered = Resolve<WaitEnteredFn>(providerModule, "TestProvider_WaitWRFEntered");
-			releaseWRF = Resolve<ReleaseFn>(providerModule, "TestProvider_ReleaseWRF");
-			resetProvider = Resolve<ResetFn>(providerModule, "TestProvider_Reset");
-			getCounter = Resolve<CounterFn>(providerModule, "TestProvider_GetCounter");
-			getObserved = Resolve<ObservedFn>(providerModule, "TestProvider_GetObserved");
-			getOrder = Resolve<OrderFn>(providerModule, "TestProvider_GetOrder");
-			setShutdown = Resolve<SetShutdownFn>(providerModule, "TestProvider_SetShutdown");
-			triggerShutdown = Resolve<TriggerShutdownFn>(providerModule, "TestProvider_TriggerShutdown");
-			getCallbackShutdownStatus = Resolve<CallbackShutdownStatusFn>(providerModule,
-				"TestProvider_GetCallbackShutdownStatus");
-			Check(getWRF && getCSF && getPAS && getInvalid && blockWRF && waitWRFEntered && releaseWRF &&
-				resetProvider && getCounter && getObserved && getOrder && setShutdown && triggerShutdown &&
-				getCallbackShutdownStatus,
-				"all Provider exports are rebound from the reloaded DLL instance before further use");
+			const bool reloadedProviderExportsResolved =
+				ResolveRequired(providerModule, "TestProvider_GetWRF", getWRF, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetCSF", getCSF, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetPAS", getPAS, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetInvalid", getInvalid, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_BlockWRF", blockWRF, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_WaitWRFEntered", waitWRFEntered, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_ReleaseWRF", releaseWRF, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_Reset", resetProvider, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetCounter", getCounter, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetObserved", getObserved, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetOrder", getOrder, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_SetShutdown", setShutdown, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_TriggerShutdown", triggerShutdown, missingProviderExport) &&
+				ResolveRequired(providerModule, "TestProvider_GetCallbackShutdownStatus",
+					getCallbackShutdownStatus, missingProviderExport);
+			if (!reloadedProviderExportsResolved) {
+				(void)shutdown();
+				FreeLibrary(providerModule);
+				FreeLibrary(hostModule);
+				bool isExpectedMissingExport = expectedMissingReloadExport != nullptr;
+				if (isExpectedMissingExport) {
+					std::size_t index{};
+					for (; missingProviderExport[index] != '\0' && expectedMissingReloadExport[index] != L'\0';
+						++index) {
+						if (static_cast<unsigned char>(missingProviderExport[index]) !=
+							static_cast<unsigned short>(expectedMissingReloadExport[index])) {
+							isExpectedMissingExport = false;
+							break;
+						}
+					}
+					if (missingProviderExport[index] != '\0' || expectedMissingReloadExport[index] != L'\0') {
+						isExpectedMissingExport = false;
+					}
+				}
+				if (isExpectedMissingExport) {
+					std::cout << "PASS: controlled reload rejection for missing export '"
+						<< missingProviderExport << "'; no unresolved function pointer was called\n";
+					return true;
+				}
+				++failures;
+				std::cerr << "FAIL: reload aborted safely at missing export '"
+					<< (missingProviderExport ? missingProviderExport : "<unknown>") << "'\n";
+				return false;
+			}
 			resetProvider();
 			setShutdown(shutdown);
 			wrf = {};
@@ -514,11 +586,13 @@ namespace {
 
 int wmain(int argc, wchar_t** argv)
 {
-	if (argc != 3) {
-		std::cerr << "Usage: CrossDllHost.exe <IIF mock DLL> <Provider DLL>\n";
+	if (argc != 3 && argc != 5) {
+		std::cerr << "Usage: CrossDllHost.exe <IIF mock DLL> <Provider DLL> "
+			"[<reload Provider DLL> <expected missing export>]\n";
 		return 2;
 	}
-	const bool ok = Run(argv[1], argv[2]);
+	const bool ok = Run(argv[1], argv[2], argc == 5 ? argv[3] : nullptr,
+		argc == 5 ? argv[4] : nullptr);
 	if (failures == 0 && ok) {
 		std::cout << "PASS: Host/IIF/Provider cross-DLL ABI and unload fixtures\n";
 		return 0;

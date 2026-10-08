@@ -30,6 +30,12 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 
 	add_library(combatbus_test_provider SHARED tests/MockProviderDll.cpp)
 	target_include_directories(combatbus_test_provider PRIVATE include)
+	add_library(combatbus_test_provider_missing_export SHARED tests/MockProviderDll.cpp)
+	target_include_directories(combatbus_test_provider_missing_export PRIVATE include)
+	target_compile_definitions(combatbus_test_provider_missing_export PRIVATE
+		COMBATBUS_TEST_OMIT_CALLBACK_SHUTDOWN_STATUS)
+	set_target_properties(combatbus_test_provider_missing_export PROPERTIES
+		OUTPUT_NAME "combatbus_test_provider_missing_export")
 
 	add_executable(combatbus_cross_dll_host
 		tests/CrossDllHost.cpp
@@ -37,7 +43,8 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		tests/CAbiHeaderSmoke.c)
 	target_include_directories(combatbus_cross_dll_host PRIVATE include)
 
-	foreach(target combatbus_iif_mock combatbus_test_provider combatbus_cross_dll_host)
+	foreach(target combatbus_iif_mock combatbus_test_provider combatbus_test_provider_missing_export
+			combatbus_cross_dll_host)
 		if(MSVC)
 			target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
 		else()
@@ -55,6 +62,12 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		COMMAND combatbus_cross_dll_host
 			$<TARGET_FILE:combatbus_iif_mock>
 			$<TARGET_FILE:combatbus_test_provider>)
+	add_test(NAME combatbus_cross_dll_missing_reload_export
+		COMMAND combatbus_cross_dll_host
+			$<TARGET_FILE:combatbus_iif_mock>
+			$<TARGET_FILE:combatbus_test_provider>
+			$<TARGET_FILE:combatbus_test_provider_missing_export>
+			TestProvider_GetCallbackShutdownStatus)
 else()
 	message(STATUS "Windows x64 cross-DLL ABI targets are not supported by this build host")
 endif()

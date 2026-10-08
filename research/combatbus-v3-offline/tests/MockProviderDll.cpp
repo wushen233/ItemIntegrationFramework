@@ -218,8 +218,10 @@ TEST_EXPORT void IIF_CB_CALL TestProvider_TriggerShutdown(void)
 	g_state.triggerShutdown = true;
 }
 
+#if !defined(COMBATBUS_TEST_OMIT_CALLBACK_SHUTDOWN_STATUS)
 TEST_EXPORT std::uint32_t IIF_CB_CALL TestProvider_GetCallbackShutdownStatus(void)
 {
 	std::scoped_lock lock{ g_state.mutex };
 	return g_state.callbackShutdownStatus;
 }
+#endif
