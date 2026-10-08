@@ -119,7 +119,9 @@ extern "C" __declspec(dllexport) bool F4SEAPI F4SEPlugin_Query(
 
 extern "C" __declspec(dllexport) bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* f4se)
 {
-	if (!f4se) return false;
+	if (!f4se || f4se->RuntimeVersion() != F4SE::RUNTIME_1_10_163) {
+		return false;
+	}
 	F4SE::InitInfo init{};
 	init.logName = "IIFCombatBusProviderLifecycleSmoke";
 	init.logLevel = REX::ELogLevel::Info;

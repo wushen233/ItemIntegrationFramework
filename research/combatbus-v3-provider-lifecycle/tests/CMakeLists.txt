@@ -48,3 +48,7 @@ add_test(NAME f4se_version_template_static
 	COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 		"${CMAKE_CURRENT_SOURCE_DIR}/VerifyF4SEVersionTemplates.ps1"
 		-RepositoryRoot "${REPOSITORY_ROOT}")
+add_test(NAME f4se_load_runtime_guard_static
+	COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+		"${CMAKE_CURRENT_SOURCE_DIR}/VerifyLoadRuntimeGuard.ps1"
+		-ProjectRoot "${CMAKE_CURRENT_SOURCE_DIR}/..")
