@@ -7,6 +7,7 @@ on:
       - '.github/workflows/combatbus-v3-offline.yml'
       - 'research/combatbus-v3-offline/**'
       - 'research/combatbus-v3-runtime-smoke/**'
+      - 'research/combatbus-v3-provider-lifecycle/**'
 
 permissions:
   contents: read
@@ -106,6 +107,26 @@ jobs:
       - name: Run complete CTest suite
         shell: pwsh
         run: ctest --test-dir "$env:CTEST_DIR" -C Release --output-on-failure --verbose --parallel 1 --output-junit "$env:CTEST_DIR\ctest-results.xml"
+
+      - name: Build and run Provider lifecycle cross-DLL fixture
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'combatbus-provider-lifecycle-${{ matrix.toolchain }}'
+          $configure = @(
+            '-S', 'research/combatbus-v3-provider-lifecycle/tests',
+            '-B', $fixture,
+            '-G', 'Visual Studio 17 2022',
+            '-A', 'x64'
+          )
+          if ('${{ matrix.toolchain }}' -eq 'clangcl') {
+            $configure += @('-T', 'ClangCL')
+          }
+          & cmake @configure
+          if ($LASTEXITCODE -ne 0) { throw "Provider lifecycle CMake configure failed: $LASTEXITCODE" }
+          & cmake --build $fixture --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw "Provider lifecycle fixture build failed: $LASTEXITCODE" }
+          & ctest --test-dir $fixture -C Release --output-on-failure --verbose --parallel 1
+          if ($LASTEXITCODE -ne 0) { throw "Provider lifecycle CTest failed: $LASTEXITCODE" }
 
       - name: Verify traces and report artifact hashes
         shell: pwsh
