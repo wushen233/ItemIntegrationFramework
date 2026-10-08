@@ -6,17 +6,12 @@ on:
     paths:
       - '.github/workflows/combatbus-v3-offline.yml'
       - 'research/combatbus-v3-offline/**'
-  push:
-    branches: [review/combatbus-v3-offline-phase1q]
-    paths:
-      - '.github/workflows/combatbus-v3-offline.yml'
-      - 'research/combatbus-v3-offline/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: combatbus-v3-offline-${{ github.event.pull_request.number || github.ref }}
+  group: combatbus-v3-offline-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -29,15 +24,21 @@ jobs:
       matrix:
         toolchain: [msvc, clangcl]
     env:
-      BUILD_DIR: ${{ github.workspace }}\_ci\combatbus-v3-${{ matrix.toolchain }}
-      CONFIGURATION: Release
+      XMAKE_BUILD_DIR: ${{ github.workspace }}\_ci\combatbus-v3-${{ matrix.toolchain }}
+      CTEST_DIR: ${{ github.workspace }}\_ci\ctest-combatbus-v3-${{ matrix.toolchain }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Set up xmake
+        uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1.2.5
+        with:
+          xmake-version: '3.0.2'
+
       - name: Report toolchain versions
         shell: pwsh
         run: |
+          xmake --version
           cmake --version
           ctest --version
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -61,46 +62,54 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "clang-cl version query failed: $LASTEXITCODE" }
           }
 
-      - name: Configure MSVC
-        if: matrix.toolchain == 'msvc'
-        shell: pwsh
-        run: cmake -S research/combatbus-v3-offline -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64
-
-      - name: Configure Clang-cl
-        if: matrix.toolchain == 'clangcl'
-        shell: pwsh
-        run: cmake -S research/combatbus-v3-offline -B "$env:BUILD_DIR" -G "Visual Studio 17 2022" -A x64 -T ClangCL
-
-      - name: Verify selected C and C++ compiler
+      - name: Configure selected xmake toolchain
         shell: pwsh
         run: |
-          $cache = Get-Content -Raw (Join-Path $env:BUILD_DIR 'CMakeCache.txt')
-          foreach ($language in @('C', 'CXX')) {
-            $pattern = '(?m)^CMAKE_' + $language + '_COMPILER(?::[^=]+)?=(.+)$'
-            $match = [regex]::Match($cache, $pattern)
-            if (-not $match.Success) { throw "CMake did not record its $language compiler" }
-            $compiler = $match.Groups[1].Value
-            Write-Host "CMake $language compiler: $compiler"
-            if ('${{ matrix.toolchain }}' -eq 'clangcl' -and $compiler -notmatch '(?i)clang-cl') {
-              throw "Clang-cl job selected a different $language compiler: $compiler"
-            }
-            if ('${{ matrix.toolchain }}' -eq 'msvc' -and $compiler -match '(?i)clang-cl') {
-              throw "MSVC job selected Clang-cl for $language`: $compiler"
-            }
+          $project = Join-Path $env:GITHUB_WORKSPACE 'research\combatbus-v3-offline'
+          $xmakeBuildDir = '_ci/combatbus-v3-${{ matrix.toolchain }}'
+          if ('${{ matrix.toolchain }}' -eq 'clangcl') {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            $vs = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1).Trim()
+            if (-not $vs) { throw 'Visual Studio installation not found for Clang-cl' }
+            $clang = Join-Path $vs 'VC\Tools\Llvm\bin\clang-cl.exe'
+            if (-not (Test-Path -LiteralPath $clang)) { throw 'Visual Studio Clang-cl toolset is unavailable' }
+            Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path -Parent $clang)
+            $env:Path = (Split-Path -Parent $clang) + [IO.Path]::PathSeparator + $env:Path
+            & xmake config "--project=$project" -p windows -a x64 -m release --toolchain=clang-cl --cc=clang-cl --cxx=clang-cl "--builddir=$xmakeBuildDir"
+          }
+          else {
+            & xmake config "--project=$project" -p windows -a x64 -m release --toolchain=msvc "--builddir=$xmakeBuildDir"
+          }
+          if ($LASTEXITCODE -ne 0) { throw "xmake configuration failed: $LASTEXITCODE" }
+          $targetInfo = (& xmake show "--project=$project" -t combatbus_cross_dll_host | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "xmake toolchain report failed: $LASTEXITCODE" }
+          Write-Host $targetInfo
+          if ('${{ matrix.toolchain }}' -eq 'clangcl' -and $targetInfo -notmatch '(?i)clang-cl') {
+            throw 'xmake did not select clang-cl for the cross-DLL Host target'
+          }
+          if ('${{ matrix.toolchain }}' -eq 'msvc' -and $targetInfo -notmatch '(?i)compiler \(cxx\).*cl\.exe') {
+            throw 'xmake did not select MSVC for the cross-DLL Host target'
           }
 
       - name: Build all ABI and lifecycle targets
         shell: pwsh
-        run: cmake --build "$env:BUILD_DIR" --config "$env:CONFIGURATION" --parallel 2
+        run: xmake build "--project=$env:GITHUB_WORKSPACE/research/combatbus-v3-offline" --all --jobs=2 --verbose
+
+      - name: Configure CTest manifest for xmake outputs
+        shell: pwsh
+        run: |
+          cmake -S research/combatbus-v3-offline -B "$env:CTEST_DIR" -G "Visual Studio 17 2022" -A x64 `
+            "-DCOMBATBUS_EXTERNAL_BINARY_DIR=$env:XMAKE_BUILD_DIR\windows\x64"
+          if ($LASTEXITCODE -ne 0) { throw "CTest manifest configuration failed: $LASTEXITCODE" }
 
       - name: Run complete CTest suite
         shell: pwsh
-        run: ctest --test-dir "$env:BUILD_DIR" -C "$env:CONFIGURATION" --output-on-failure --verbose --parallel 1 --output-junit "$env:BUILD_DIR\ctest-results.xml"
+        run: ctest --test-dir "$env:CTEST_DIR" -C Release --output-on-failure --verbose --parallel 1 --output-junit "$env:CTEST_DIR\ctest-results.xml"
 
       - name: Verify traces and report artifact hashes
         shell: pwsh
         run: |
-          $bin = Join-Path $env:BUILD_DIR 'bin\Release'
+          $bin = Join-Path $env:XMAKE_BUILD_DIR 'windows\x64\release'
           $required = @(
             'combatbus_phase1o_fixtures.exe',
             'combatbus_cross_dll_host.exe',
@@ -113,11 +122,11 @@ jobs:
             $path = Join-Path $bin $name
             if (-not (Test-Path -LiteralPath $path)) { throw "Missing expected test artifact: $name" }
           }
-          $probe = Get-Content -Raw (Join-Path $env:BUILD_DIR 'startup-probe.trace')
+          $probe = Get-Content -Raw (Join-Path $env:CTEST_DIR 'startup-probe.trace')
           foreach ($marker in @('probe.wmain.entered', 'probe.before_return')) {
             if (-not $probe.Contains($marker)) { throw "Startup probe marker missing: $marker" }
           }
-          $hostTrace = Get-Content -Raw (Join-Path $env:BUILD_DIR 'cross-dll-startup.trace')
+          $hostTrace = Get-Content -Raw (Join-Path $env:CTEST_DIR 'cross-dll-startup.trace')
           $hostMarkers = @(
             'host.wmain.entered', 'host.before_host_dll_load', 'host.host_dll_loaded',
             'host.before_provider_dll_load', 'host.provider_dll_loaded', 'host.before_provider_reload',
@@ -130,7 +139,7 @@ jobs:
             if ($position -le $previous) { throw "Host startup/lifecycle marker missing or out of order: $marker" }
             $previous = $position
           }
-          $junit = [xml](Get-Content -Raw (Join-Path $env:BUILD_DIR 'ctest-results.xml'))
+          $junit = [xml](Get-Content -Raw (Join-Path $env:CTEST_DIR 'ctest-results.xml'))
           if ([int]$junit.testsuite.failures -ne 0 -or [int]$junit.testsuite.tests -lt 7) {
             throw 'CTest JUnit summary reports a failure or fewer than seven tests'
           }
