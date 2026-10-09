@@ -40,6 +40,7 @@ endforeach()
 enable_testing()
 add_test(NAME provider_lifecycle_cross_dll
 	COMMAND iif_provider_lifecycle_host_test $<TARGET_FILE:iif_provider_lifecycle_host>)
+set_tests_properties(provider_lifecycle_cross_dll PROPERTIES TIMEOUT 45)
 add_test(NAME provider_lifecycle_no_dispatch_static
 	COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 		"${CMAKE_CURRENT_SOURCE_DIR}/VerifyLifecycleNoDispatch.ps1"
