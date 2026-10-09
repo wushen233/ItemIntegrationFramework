@@ -17,10 +17,11 @@
 #error This fixture intentionally validates only the Win64 ABI.
 #endif
 
-extern "C" std::uint64_t __fastcall ObservationWrapper(std::uint32_t, void*, void*, void*, float*);
+std::uint64_t __fastcall ObservationWrapper(std::uint32_t, void*, void*, void*, float*);
 extern "C" std::uint64_t g_asm_wrapper_return;
 extern "C" std::uint32_t g_asm_register_preservation_ok;
 extern "C" std::uint32_t __fastcall AbiCallWithNonvolatileSentinels(std::uint32_t, void*, void*, void*, float*);
+extern "C" std::uint64_t (__fastcall *g_asm_wrapper_target)(std::uint32_t, void*, void*, void*, float*) = nullptr;
 
 namespace
 {
@@ -56,6 +57,7 @@ namespace
 			return false;
 		}
 		std::printf("%s: %s\n", condition ? "PASS" : "FAIL", message);
+		std::fflush(stdout);
 		return condition;
 	}
 
@@ -84,7 +86,9 @@ namespace
 
 }
 
-extern "C" __declspec(noinline) std::uint64_t __fastcall ObservationWrapper(std::uint32_t entry, void* second, void* third, void* fourth, float* fifth)
+// The native callsite needs the Win64 machine ABI, not an exported C symbol. Keep C++ language
+// linkage so C++ exception unwinding through the wrapper remains testable by both compilers.
+__declspec(noinline) std::uint64_t __fastcall ObservationWrapper(std::uint32_t entry, void* second, void* third, void* fourth, float* fifth)
 {
 	const auto before = *fifth;
 	const auto result = g_original(entry, second, third, fourth, fifth);
@@ -102,6 +106,7 @@ extern "C" std::uint32_t g_asm_register_preservation_ok = 0;
 int main()
 {
 	g_original = &OriginalEntry;
+	g_asm_wrapper_target = &ObservationWrapper;
 	void* second = reinterpret_cast<void*>(0x1111222233334444ull);
 	void* third = reinterpret_cast<void*>(0x5555666677778888ull);
 	void* fourth = reinterpret_cast<void*>(0x9999AAAABBBBCCCCull);
