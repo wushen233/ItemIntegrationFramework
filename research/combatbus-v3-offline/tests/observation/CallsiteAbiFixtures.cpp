@@ -4,15 +4,20 @@
 #include <intrin.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if !defined(_M_X64)
 #error This fixture intentionally validates only the Win64 ABI.
@@ -23,7 +28,7 @@ extern "C" std::uint64_t g_asm_wrapper_return;
 extern "C" std::uint32_t g_asm_register_preservation_ok;
 extern "C" std::uint32_t g_asm_xmm_restore_ok;
 extern "C" std::uint32_t g_asm_corruption_mode;
-extern "C" std::uint32_t g_asm_xmm6_mask;
+extern "C" std::uint32_t g_asm_last_xmm_mask;
 extern "C" std::uint32_t g_asm_outer_gpr_restore_ok;
 extern "C" std::uint32_t __fastcall AbiCallWithNonvolatileSentinels(std::uint32_t, void*, void*, void*, float*);
 extern "C" std::uint32_t __fastcall AbiCallProbeAndVerifyGprs(std::uint32_t, void*, void*, void*, float*);
@@ -65,6 +70,81 @@ namespace
 		std::printf("%s: %s\n", condition ? "PASS" : "FAIL", message);
 		std::fflush(stdout);
 		return condition;
+	}
+
+	bool VerifyRegisterFailureBranches(const char* sourcePath)
+	{
+		std::ifstream source(sourcePath);
+		if (!source) return false;
+		auto compact = [](std::string line) {
+			if (const auto comment = line.find(';'); comment != std::string::npos) line.resize(comment);
+			std::string result;
+			for (const unsigned char ch : line) {
+				if (!std::isspace(ch)) result.push_back(static_cast<char>(std::tolower(ch)));
+			}
+			return result;
+		};
+		std::array<bool, 10> routed{};
+		std::vector<std::string> lines;
+		for (std::string line; std::getline(source, line);) lines.push_back(compact(std::move(line)));
+
+		std::size_t checks = 0;
+		std::size_t gprBranches = 0;
+		for (std::size_t i = 0; i < lines.size(); ++i) {
+			if (lines[i] != "abi_probe_check:") continue;
+			for (std::size_t j = i + 1; j < lines.size(); ++j) {
+				if (lines[j].starts_with("pcmpeqbxmm6,")) break;
+				if (!lines[j].starts_with("jne")) continue;
+				++gprBranches;
+				if (lines[j] != "jneabi_probe_failed") {
+					std::fprintf(stderr, "Static source check found a GPR mismatch branch [%s].\n", lines[j].c_str());
+					return false;
+				}
+			}
+			break;
+		}
+		if (gprBranches != 8) {
+			std::fprintf(stderr, "Static source check found %zu GPR mismatch branches; expected 8.\n", gprBranches);
+			return false;
+		}
+
+		for (std::size_t i = 0; i < lines.size(); ++i) {
+			int reg = -1;
+			for (int candidate = 6; candidate <= 15; ++candidate) {
+				const auto token = "pcmpeqb" + std::string("xmm") + std::to_string(candidate) + ",";
+				if (lines[i].starts_with(token)) {
+					reg = candidate;
+					break;
+				}
+			}
+			if (reg == -1) continue;
+			if (routed[static_cast<std::size_t>(reg - 6)]) {
+				std::fprintf(stderr, "Static source check found duplicate XMM%d comparison.\n", reg);
+				return false;
+			}
+			++checks;
+
+			bool foundMaskCheck = false;
+			for (std::size_t j = i + 1; j < lines.size(); ++j) {
+				if (lines[j].empty()) continue;
+				if (!foundMaskCheck) {
+					if (lines[j] == "cmpeax,0ffffh") foundMaskCheck = true;
+					continue;
+				}
+				routed[static_cast<std::size_t>(reg - 6)] = lines[j] == "jneabi_probe_failed";
+				if (!routed[static_cast<std::size_t>(reg - 6)])
+					std::fprintf(stderr, "XMM%d branch text was [%s].\n", reg, lines[j].c_str());
+				break;
+			}
+			if (!routed[static_cast<std::size_t>(reg - 6)]) {
+				std::fprintf(stderr, "Static source check: XMM%d mismatch is not routed to abi_probe_failed.\n", reg);
+				return false;
+			}
+		}
+		const bool complete = checks == routed.size() &&
+			std::all_of(routed.begin(), routed.end(), [](bool value) { return value; });
+		if (!complete) std::fprintf(stderr, "Static source check found %zu XMM comparisons; expected %zu.\n", checks, routed.size());
+		return complete;
 	}
 
 	bool EntryStackAligned() noexcept
@@ -110,11 +190,18 @@ extern "C" std::uint64_t g_asm_wrapper_return = 0;
 extern "C" std::uint32_t g_asm_register_preservation_ok = 0;
 extern "C" std::uint32_t g_asm_xmm_restore_ok = 0;
 extern "C" std::uint32_t g_asm_corruption_mode = 0;
-extern "C" std::uint32_t g_asm_xmm6_mask = 0;
+extern "C" std::uint32_t g_asm_last_xmm_mask = 0;
 extern "C" std::uint32_t g_asm_outer_gpr_restore_ok = 0;
 
-int main()
+int main(int argc, char** argv)
 {
+	if (argc == 2) {
+		Expect(VerifyRegisterFailureBranches(argv[1]),
+			"static check: all GPR and XMM6-XMM15 mismatches branch to the explicit failure result");
+	} else if (argc != 1) {
+		Expect(false, "ABI fixture accepts at most one MASM source path");
+	}
+
 	g_original = &OriginalEntry;
 	g_asm_wrapper_target = &ObservationWrapper;
 	void* second = reinterpret_cast<void*>(0x1111222233334444ull);
@@ -195,14 +282,15 @@ int main()
 	Expect(g_seen.calls == 1,
 		"MASM positive probe calls the wrapper exactly once");
 
-	for (const auto [mode, label] : std::array<std::pair<std::uint32_t, const char*>, 2>{
+	for (const auto [mode, label] : std::array<std::pair<std::uint32_t, const char*>, 3>{
 		     std::pair{ 1u, "GPR compare failure returns explicit rejection" },
-		     std::pair{ 2u, "XMM compare failure returns explicit rejection" } }) {
+		     std::pair{ 2u, "XMM6 compare failure returns explicit rejection" },
+		     std::pair{ 3u, "XMM14 compare failure returns explicit rejection" } }) {
 		g_seen.calls = 0;
 		g_asm_register_preservation_ok = 0xFFFFFFFFu;
 		g_asm_xmm_restore_ok = 0;
 		g_asm_wrapper_return = 0;
-		g_asm_xmm6_mask = 0;
+		g_asm_last_xmm_mask = 0;
 		g_asm_outer_gpr_restore_ok = 0;
 		g_asm_corruption_mode = mode;
 		const auto rejected = AbiCallProbeAndVerifyGprs(0x24, second, third, fourth, &value);
@@ -215,8 +303,12 @@ int main()
 		Expect(g_seen.calls == 1 && g_asm_wrapper_return == 0xD00DFEEDCAFEBEEFULL,
 			"negative MASM probe still forwards exactly one call and preserves its return value");
 		if (mode == 2) {
-			Expect(g_asm_xmm6_mask == 1,
-				"XMM partial equality mask of exactly 1 is rejected, not treated as PASS");
+			Expect(g_asm_last_xmm_mask == 1,
+				"XMM6 partial equality mask of exactly 1 is rejected, not treated as PASS");
+		}
+		if (mode == 3) {
+			Expect(g_asm_last_xmm_mask == 1,
+				"XMM14 partial equality mask of exactly 1 is rejected, not treated as PASS");
 		}
 	}
 	g_asm_corruption_mode = 0;

@@ -112,7 +112,8 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 			"${CMAKE_CURRENT_SOURCE_DIR}/tests/NoHookStructureCheck.ps1" "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 	add_test(NAME observation_callsite_abi
-		COMMAND "${COMBATBUS_TEST_BINARY_DIR}/Release/observation_callsite_abi_fixtures.exe")
+		COMMAND "${COMBATBUS_TEST_BINARY_DIR}/Release/observation_callsite_abi_fixtures.exe"
+			"${CMAKE_CURRENT_SOURCE_DIR}/tests/observation/Win64NonvolatileProbe.asm")
 	add_test(NAME observation_callsite_rel32
 		COMMAND "${COMBATBUS_TEST_BINARY_DIR}/Release/observation_callsite_rel32_fixtures.exe")
 	add_test(NAME observation_mpsc_ring

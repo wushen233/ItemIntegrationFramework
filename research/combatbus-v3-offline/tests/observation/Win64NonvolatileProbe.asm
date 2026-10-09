@@ -2,7 +2,7 @@ EXTERN g_asm_wrapper_return:QWORD
 EXTERN g_asm_register_preservation_ok:DWORD
 EXTERN g_asm_xmm_restore_ok:DWORD
 EXTERN g_asm_corruption_mode:DWORD
-EXTERN g_asm_xmm6_mask:DWORD
+EXTERN g_asm_last_xmm_mask:DWORD
 EXTERN g_asm_outer_gpr_restore_ok:DWORD
 EXTERN g_asm_wrapper_target:QWORD
 
@@ -103,6 +103,8 @@ AbiCallWithNonvolatileSentinels PROC FRAME
     je   abi_probe_corrupt_gpr
     cmp  dword ptr [g_asm_corruption_mode], 2
     je   abi_probe_corrupt_xmm
+    cmp  dword ptr [g_asm_corruption_mode], 3
+    je   abi_probe_corrupt_xmm14
     jmp  abi_probe_check
 
 abi_probe_corrupt_gpr:
@@ -114,6 +116,13 @@ abi_probe_corrupt_xmm:
     ; therefore creates an exact one-bit PMOVMSKB match (mask == 1).
     mov  eax, 6
     movd xmm6, eax
+    jmp  abi_probe_check
+
+abi_probe_corrupt_xmm14:
+    ; xmm14_sentinel has byte 0 == 14h and all other bytes nonzero. This
+    ; creates the same exact one-bit PMOVMSKB failure at the formerly missed site.
+    mov  eax, 14h
+    movd xmm14, eax
 
 abi_probe_check:
     xor  eax, eax
@@ -145,43 +154,52 @@ abi_probe_check:
 
     pcmpeqb xmm6, xmmword ptr [xmm_sentinel_6]
     pmovmskb eax, xmm6
-    mov  dword ptr [g_asm_xmm6_mask], eax
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm7, xmmword ptr [xmm_sentinel_7]
     pmovmskb eax, xmm7
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm8, xmmword ptr [xmm_sentinel_8]
     pmovmskb eax, xmm8
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm9, xmmword ptr [xmm_sentinel_9]
     pmovmskb eax, xmm9
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm10, xmmword ptr [xmm_sentinel_10]
     pmovmskb eax, xmm10
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm11, xmmword ptr [xmm_sentinel_11]
     pmovmskb eax, xmm11
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm12, xmmword ptr [xmm_sentinel_12]
     pmovmskb eax, xmm12
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm13, xmmword ptr [xmm_sentinel_13]
     pmovmskb eax, xmm13
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     pcmpeqb xmm14, xmmword ptr [xmm_sentinel_14]
     pmovmskb eax, xmm14
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm15, xmmword ptr [xmm_sentinel_15]
     pmovmskb eax, xmm15
+    mov  dword ptr [g_asm_last_xmm_mask], eax
     cmp  eax, 0FFFFh
     jne  abi_probe_failed
     mov  eax, 1
