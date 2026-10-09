@@ -12,6 +12,7 @@
 #include <exception>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 #if !defined(_M_X64)
 #error This fixture intentionally validates only the Win64 ABI.
@@ -21,7 +22,11 @@ std::uint64_t __fastcall ObservationWrapper(std::uint32_t, void*, void*, void*, 
 extern "C" std::uint64_t g_asm_wrapper_return;
 extern "C" std::uint32_t g_asm_register_preservation_ok;
 extern "C" std::uint32_t g_asm_xmm_restore_ok;
+extern "C" std::uint32_t g_asm_corruption_mode;
+extern "C" std::uint32_t g_asm_xmm6_mask;
+extern "C" std::uint32_t g_asm_outer_gpr_restore_ok;
 extern "C" std::uint32_t __fastcall AbiCallWithNonvolatileSentinels(std::uint32_t, void*, void*, void*, float*);
+extern "C" std::uint32_t __fastcall AbiCallProbeAndVerifyGprs(std::uint32_t, void*, void*, void*, float*);
 extern "C" std::uint64_t (__fastcall *g_asm_wrapper_target)(std::uint32_t, void*, void*, void*, float*) = nullptr;
 
 namespace
@@ -104,6 +109,9 @@ __declspec(noinline) std::uint64_t __fastcall ObservationWrapper(std::uint32_t e
 extern "C" std::uint64_t g_asm_wrapper_return = 0;
 extern "C" std::uint32_t g_asm_register_preservation_ok = 0;
 extern "C" std::uint32_t g_asm_xmm_restore_ok = 0;
+extern "C" std::uint32_t g_asm_corruption_mode = 0;
+extern "C" std::uint32_t g_asm_xmm6_mask = 0;
+extern "C" std::uint32_t g_asm_outer_gpr_restore_ok = 0;
 
 int main()
 {
@@ -171,13 +179,47 @@ int main()
 	g_asm_wrapper_return = 0;
 	g_asm_register_preservation_ok = 0;
 	g_asm_xmm_restore_ok = 0;
+	g_seen.calls = 0;
+	g_asm_outer_gpr_restore_ok = 0;
 	Expect(RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(&AbiCallWithNonvolatileSentinels), &imageBase, nullptr) != nullptr,
 		"MASM caller exposes unwind metadata for its saved GPR and XMM state");
-	const auto preserved = AbiCallWithNonvolatileSentinels(0x24, second, third, fourth, &value);
+	Expect(RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(&AbiCallProbeAndVerifyGprs), &imageBase, nullptr) != nullptr,
+		"outer MASM caller exposes unwind metadata while verifying caller GPR preservation");
+	const auto preserved = AbiCallProbeAndVerifyGprs(0x24, second, third, fourth, &value);
 	Expect(preserved == 1 && g_asm_register_preservation_ok == 1 && g_asm_xmm_restore_ok == 1,
 		"MASM caller confirms RBX/RBP/RSI/RDI/R12-R15 and XMM6-XMM15 low 128 bits survive wrapper call");
+	Expect(g_asm_outer_gpr_restore_ok == 1,
+		"outer MASM caller confirms all nonvolatile GPR sentinels survive the inner ABI probe");
 	Expect(g_asm_wrapper_return == 0xD00DFEEDCAFEBEEFULL,
 		"MASM caller confirms wrapper return value survives the ABI boundary");
+	Expect(g_seen.calls == 1,
+		"MASM positive probe calls the wrapper exactly once");
+
+	for (const auto [mode, label] : std::array<std::pair<std::uint32_t, const char*>, 2>{
+		     std::pair{ 1u, "GPR compare failure returns explicit rejection" },
+		     std::pair{ 2u, "XMM compare failure returns explicit rejection" } }) {
+		g_seen.calls = 0;
+		g_asm_register_preservation_ok = 0xFFFFFFFFu;
+		g_asm_xmm_restore_ok = 0;
+		g_asm_wrapper_return = 0;
+		g_asm_xmm6_mask = 0;
+		g_asm_outer_gpr_restore_ok = 0;
+		g_asm_corruption_mode = mode;
+		const auto rejected = AbiCallProbeAndVerifyGprs(0x24, second, third, fourth, &value);
+		Expect(rejected == 0 && g_asm_register_preservation_ok == 0,
+			label);
+		Expect(g_asm_xmm_restore_ok == 1,
+			"negative MASM probe restores caller XMM6-XMM15 state");
+		Expect(g_asm_outer_gpr_restore_ok == 1,
+			"negative MASM probe does not leak corrupted nonvolatile GPR state to its caller");
+		Expect(g_seen.calls == 1 && g_asm_wrapper_return == 0xD00DFEEDCAFEBEEFULL,
+			"negative MASM probe still forwards exactly one call and preserves its return value");
+		if (mode == 2) {
+			Expect(g_asm_xmm6_mask == 1,
+				"XMM partial equality mask of exactly 1 is rejected, not treated as PASS");
+		}
+	}
+	g_asm_corruption_mode = 0;
 
 	return g_failed == 0 ? 0 : 1;
 }

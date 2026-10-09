@@ -1,9 +1,13 @@
 EXTERN g_asm_wrapper_return:QWORD
 EXTERN g_asm_register_preservation_ok:DWORD
 EXTERN g_asm_xmm_restore_ok:DWORD
+EXTERN g_asm_corruption_mode:DWORD
+EXTERN g_asm_xmm6_mask:DWORD
+EXTERN g_asm_outer_gpr_restore_ok:DWORD
 EXTERN g_asm_wrapper_target:QWORD
 
 PUBLIC AbiCallWithNonvolatileSentinels
+PUBLIC AbiCallProbeAndVerifyGprs
 
 .const
 ALIGN 16
@@ -92,65 +96,86 @@ AbiCallWithNonvolatileSentinels PROC FRAME
 
     lea  r10, g_asm_wrapper_return
     mov  qword ptr [r10], rax
+
+    ; Test-only negative injection after the wrapper returns. The epilogue below
+    ; still restores every nonvolatile register saved by this probe.
+    cmp  dword ptr [g_asm_corruption_mode], 1
+    je   abi_probe_corrupt_gpr
+    cmp  dword ptr [g_asm_corruption_mode], 2
+    je   abi_probe_corrupt_xmm
+    jmp  abi_probe_check
+
+abi_probe_corrupt_gpr:
+    xor  ebx, ebx
+    jmp  abi_probe_check
+
+abi_probe_corrupt_xmm:
+    ; xmm6_sentinel has byte 0 == 06h and all other bytes nonzero. MOVD
+    ; therefore creates an exact one-bit PMOVMSKB match (mask == 1).
+    mov  eax, 6
+    movd xmm6, eax
+
+abi_probe_check:
     xor  eax, eax
 
     mov  r11, 1122334455667788h
     cmp  rbx, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 2233445566778899h
     cmp  rbp, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 33445566778899AAh
     cmp  rsi, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 445566778899AABBh
     cmp  rdi, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 5566778899AABBCCh
     cmp  r12, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 66778899AABBCCDDh
     cmp  r13, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 778899AABBCCDDEEh
     cmp  r14, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  r11, 123456789ABCDEF0h
     cmp  r15, r11
-    jne  abi_probe_done
+    jne  abi_probe_failed
 
     pcmpeqb xmm6, xmmword ptr [xmm_sentinel_6]
     pmovmskb eax, xmm6
+    mov  dword ptr [g_asm_xmm6_mask], eax
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm7, xmmword ptr [xmm_sentinel_7]
     pmovmskb eax, xmm7
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm8, xmmword ptr [xmm_sentinel_8]
     pmovmskb eax, xmm8
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm9, xmmword ptr [xmm_sentinel_9]
     pmovmskb eax, xmm9
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm10, xmmword ptr [xmm_sentinel_10]
     pmovmskb eax, xmm10
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm11, xmmword ptr [xmm_sentinel_11]
     pmovmskb eax, xmm11
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm12, xmmword ptr [xmm_sentinel_12]
     pmovmskb eax, xmm12
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm13, xmmword ptr [xmm_sentinel_13]
     pmovmskb eax, xmm13
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     pcmpeqb xmm14, xmmword ptr [xmm_sentinel_14]
     pmovmskb eax, xmm14
     cmp  eax, 0FFFFh
@@ -158,8 +183,12 @@ AbiCallWithNonvolatileSentinels PROC FRAME
     pcmpeqb xmm15, xmmword ptr [xmm_sentinel_15]
     pmovmskb eax, xmm15
     cmp  eax, 0FFFFh
-    jne  abi_probe_done
+    jne  abi_probe_failed
     mov  eax, 1
+    jmp  abi_probe_done
+
+abi_probe_failed:
+    xor  eax, eax
 
 abi_probe_done:
     lea  r10, g_asm_register_preservation_ok
@@ -244,5 +273,99 @@ xmm_restore_done:
     pop  rbx
     ret
 AbiCallWithNonvolatileSentinels ENDP
+
+; Outer ABI verifier loads sentinels into every nonvolatile GPR before invoking
+; the probe, then checks those sentinels after the probe returns. This proves
+; even deliberate inner failures do not leak a corrupted GPR to the caller.
+AbiCallProbeAndVerifyGprs PROC FRAME
+    push rbx
+    .pushreg rbx
+    push rbp
+    .pushreg rbp
+    push rsi
+    .pushreg rsi
+    push rdi
+    .pushreg rdi
+    push r12
+    .pushreg r12
+    push r13
+    .pushreg r13
+    push r14
+    .pushreg r14
+    push r15
+    .pushreg r15
+    sub  rsp, 68h
+    .allocstack 68h
+    .endprolog
+
+    mov  qword ptr [rsp+28h], rcx
+    mov  qword ptr [rsp+30h], rdx
+    mov  qword ptr [rsp+38h], r8
+    mov  qword ptr [rsp+40h], r9
+    mov  r10, qword ptr [rsp+0D0h]
+    mov  qword ptr [rsp+20h], r10
+    mov  qword ptr [rsp+48h], r10
+
+    mov  rbx, 1122334455667788h
+    mov  rbp, 2233445566778899h
+    mov  rsi, 33445566778899AAh
+    mov  rdi, 445566778899AABBh
+    mov  r12, 5566778899AABBCCh
+    mov  r13, 66778899AABBCCDDh
+    mov  r14, 778899AABBCCDDEEh
+    mov  r15, 123456789ABCDEF0h
+
+    mov  rcx, qword ptr [rsp+28h]
+    mov  rdx, qword ptr [rsp+30h]
+    mov  r8,  qword ptr [rsp+38h]
+    mov  r9,  qword ptr [rsp+40h]
+    call AbiCallWithNonvolatileSentinels
+    mov  qword ptr [rsp+50h], rax
+
+    mov  r11, 1122334455667788h
+    cmp  rbx, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 2233445566778899h
+    cmp  rbp, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 33445566778899AAh
+    cmp  rsi, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 445566778899AABBh
+    cmp  rdi, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 5566778899AABBCCh
+    cmp  r12, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 66778899AABBCCDDh
+    cmp  r13, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 778899AABBCCDDEEh
+    cmp  r14, r11
+    jne  outer_gpr_restore_failed
+    mov  r11, 123456789ABCDEF0h
+    cmp  r15, r11
+    jne  outer_gpr_restore_failed
+    mov  r10d, 1
+    jmp  outer_gpr_restore_done
+
+outer_gpr_restore_failed:
+    xor  r10d, r10d
+
+outer_gpr_restore_done:
+    lea  r11, g_asm_outer_gpr_restore_ok
+    mov  dword ptr [r11], r10d
+    mov  rax, qword ptr [rsp+50h]
+    add  rsp, 68h
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rdi
+    pop  rsi
+    pop  rbp
+    pop  rbx
+    ret
+AbiCallProbeAndVerifyGprs ENDP
 
 END
