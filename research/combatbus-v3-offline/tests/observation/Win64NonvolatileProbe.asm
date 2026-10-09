@@ -1,6 +1,6 @@
-EXTERN ObservationWrapper:PROC
 EXTERN g_asm_wrapper_return:QWORD
 EXTERN g_asm_register_preservation_ok:DWORD
+EXTERN g_asm_wrapper_target:QWORD
 
 PUBLIC AbiCallWithNonvolatileSentinels
 .code
@@ -41,7 +41,8 @@ AbiCallWithNonvolatileSentinels PROC FRAME
     mov  r14, 778899AABBCCDDEEh
     mov  r15, 123456789ABCDEF0h
 
-    call ObservationWrapper
+    mov  rax, qword ptr [g_asm_wrapper_target]
+    call rax
 
     lea  r10, g_asm_wrapper_return
     mov  qword ptr [r10], rax
