@@ -3,10 +3,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -149,10 +148,22 @@ namespace observation::offline
 		void Close() noexcept { _producerState.fetch_or(kClosed, std::memory_order_acq_rel); }
 		[[nodiscard]] bool WaitForProducers(std::chrono::milliseconds timeout)
 		{
-			std::unique_lock lock(_closeMutex);
-			return _closeCv.wait_for(lock, timeout, [this] {
-				return (_producerState.load(std::memory_order_acquire) & kCountMask) == 0;
-			});
+			// Quiescence is a control-thread operation: an open ring can still admit new
+			// producers, so it can never grant a successful unload/destruction decision.
+			const auto deadline = std::chrono::steady_clock::now() + timeout;
+			for (;;) {
+				const auto state = _producerState.load(std::memory_order_acquire);
+				if ((state & kClosed) == 0) return false;
+				if ((state & kCountMask) == 0) return true;
+				const auto now = std::chrono::steady_clock::now();
+				if (now >= deadline) return false;
+				// Bounded low-frequency control-thread polling avoids a condition-variable
+				// lost wakeup: producers never need a mutex or blocking notification.
+				const auto remaining = deadline - now;
+				const auto pollInterval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+					std::chrono::milliseconds(1));
+				std::this_thread::sleep_for(remaining < pollInterval ? remaining : pollInterval);
+			}
 		}
 		[[nodiscard]] std::uint64_t Dropped() const noexcept { return _dropped.load(std::memory_order_relaxed); }
 		[[nodiscard]] std::uint64_t Overflowed() const noexcept { return _overflowed.load(std::memory_order_relaxed); }
@@ -176,8 +187,7 @@ namespace observation::offline
 		}
 		void ReleaseProducer() noexcept
 		{
-			const auto prior = _producerState.fetch_sub(1, std::memory_order_release);
-			if ((prior & kClosed) != 0 && (prior & kCountMask) == 1) _closeCv.notify_all();
+			(void)_producerState.fetch_sub(1, std::memory_order_release);
 		}
 		bool CountDrop(bool overflow) noexcept
 		{
@@ -192,7 +202,5 @@ namespace observation::offline
 		std::atomic<std::uint64_t> _producerState{};
 		std::atomic<std::uint64_t> _dropped{};
 		std::atomic<std::uint64_t> _overflowed{};
-		std::mutex _closeMutex;
-		std::condition_variable _closeCv;
 	};
 }

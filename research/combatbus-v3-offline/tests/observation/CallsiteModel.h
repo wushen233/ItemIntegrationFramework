@@ -74,6 +74,7 @@ namespace observation::offline
 	{
 		std::size_t failWriteAt{ static_cast<std::size_t>(-1) };
 		bool failRollback{};
+		std::size_t failByteAt{ static_cast<std::size_t>(-1) };
 	};
 
 	[[nodiscard]] inline PatchResult ApplyCallPlan(std::span<std::uint8_t> image,
@@ -106,31 +107,42 @@ namespace observation::offline
 			}
 		}
 
-		std::size_t written{};
-		for (; written < sites.size(); ++written) {
-			if (written == options.failWriteAt) {
+		std::size_t writtenSites{};
+		std::size_t writtenBytes{};
+		bool writeFailed = false;
+		for (; writtenSites < sites.size() && !writeFailed; ++writtenSites) {
+			if (writtenSites == options.failWriteAt) {
+				writeFailed = true;
 				break;
 			}
-			const auto replacement = EncodeCallRel32(sites[written].virtualAddress, sites[written].replacementTarget);
+			const auto replacement = EncodeCallRel32(sites[writtenSites].virtualAddress, sites[writtenSites].replacementTarget);
 			if (!replacement) {
+				writeFailed = true;
 				break;
 			}
 			for (std::size_t byte = 0; byte < kCallLength; ++byte) {
-				image[sites[written].offset + byte] = (*replacement)[byte];
+				if (writtenBytes == options.failByteAt) {
+					writeFailed = true;
+					break;
+				}
+				image[sites[writtenSites].offset + byte] = (*replacement)[byte];
+				++writtenBytes;
 			}
 		}
-		if (written == sites.size()) {
+		if (!writeFailed && writtenSites == sites.size()) {
 			return PatchResult::Applied;
 		}
 
 		if (options.failRollback) {
 			return PatchResult::RecoveryRequired;
 		}
-		while (written > 0) {
-			--written;
-			for (std::size_t byte = 0; byte < kCallLength; ++byte) {
-				image[sites[written].offset + byte] = sites[written].expectedBytes[byte];
+		for (const auto& site : sites) {
+			const auto bytesAtSite = writtenBytes < kCallLength ? writtenBytes : kCallLength;
+			for (std::size_t byte = 0; byte < bytesAtSite; ++byte) {
+				image[site.offset + byte] = site.expectedBytes[byte];
 			}
+			writtenBytes -= bytesAtSite;
+			if (writtenBytes == 0) break;
 		}
 		return PatchResult::WriteFailedRolledBack;
 	}

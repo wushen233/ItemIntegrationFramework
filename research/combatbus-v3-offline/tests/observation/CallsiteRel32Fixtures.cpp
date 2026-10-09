@@ -85,6 +85,14 @@ int main()
 	Check(ApplyCallPlan(image, sites, PatchOptions{ 1, true }) == PatchResult::RecoveryRequired &&
 		image != before && image[32] == before[32],
 		"failed rollback reports recovery required and never claims clean restoration");
+	image = before;
+	Check(ApplyCallPlan(image, sites, PatchOptions{ static_cast<std::size_t>(-1), false, 3 }) ==
+		PatchResult::WriteFailedRolledBack && image == before,
+		"partial five-byte write failure restores every changed fixture byte");
+	image = before;
+	Check(ApplyCallPlan(image, sites, PatchOptions{ static_cast<std::size_t>(-1), true, 3 }) ==
+		PatchResult::RecoveryRequired && image != before,
+		"partial write with failed recovery explicitly returns RecoveryRequired");
 
 	return g_failed == 0 ? 0 : 1;
 }

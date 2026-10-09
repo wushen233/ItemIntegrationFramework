@@ -168,9 +168,11 @@ int main()
 	value = 9.0F;
 	g_asm_wrapper_return = 0;
 	g_asm_register_preservation_ok = 0;
+	Expect(RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(&AbiCallWithNonvolatileSentinels), &imageBase, nullptr) != nullptr,
+		"MASM caller exposes unwind metadata for its saved GPR and XMM state");
 	const auto preserved = AbiCallWithNonvolatileSentinels(0x24, second, third, fourth, &value);
 	Expect(preserved == 1 && g_asm_register_preservation_ok == 1,
-		"MASM caller confirms RBX/RBP/RSI/RDI/R12-R15 survive wrapper call");
+		"MASM caller confirms RBX/RBP/RSI/RDI/R12-R15 and XMM6-XMM15 low 128 bits survive wrapper call");
 	Expect(g_asm_wrapper_return == 0xD00DFEEDCAFEBEEFULL,
 		"MASM caller confirms wrapper return value survives the ABI boundary");
 
