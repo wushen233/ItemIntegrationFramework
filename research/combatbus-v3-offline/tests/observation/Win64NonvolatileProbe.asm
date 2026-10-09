@@ -1,5 +1,6 @@
 EXTERN g_asm_wrapper_return:QWORD
 EXTERN g_asm_register_preservation_ok:DWORD
+EXTERN g_asm_xmm_restore_ok:DWORD
 EXTERN g_asm_wrapper_target:QWORD
 
 PUBLIC AbiCallWithNonvolatileSentinels
@@ -163,16 +164,75 @@ AbiCallWithNonvolatileSentinels PROC FRAME
 abi_probe_done:
     lea  r10, g_asm_register_preservation_ok
     mov  dword ptr [r10], eax
-    movdqu xmm6, xmmword ptr [rsp+30h]
-    movdqu xmm7, xmmword ptr [rsp+40h]
-    movdqu xmm8, xmmword ptr [rsp+50h]
+
+	movdqu xmm6, xmmword ptr [rsp+30h]
+	movdqu xmm7, xmmword ptr [rsp+40h]
+	movdqu xmm8, xmmword ptr [rsp+50h]
     movdqu xmm9, xmmword ptr [rsp+60h]
     movdqu xmm10, xmmword ptr [rsp+70h]
     movdqu xmm11, xmmword ptr [rsp+80h]
     movdqu xmm12, xmmword ptr [rsp+90h]
-    movdqu xmm13, xmmword ptr [rsp+0A0h]
-    movdqu xmm14, xmmword ptr [rsp+0B0h]
-    movdqu xmm15, xmmword ptr [rsp+0C0h]
+	movdqu xmm13, xmmword ptr [rsp+0A0h]
+	movdqu xmm14, xmmword ptr [rsp+0B0h]
+	movdqu xmm15, xmmword ptr [rsp+0C0h]
+	xor  r10d, r10d
+	movdqu xmm0, xmmword ptr [rsp+30h]
+	pcmpeqb xmm0, xmm6
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+40h]
+	pcmpeqb xmm0, xmm7
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+50h]
+	pcmpeqb xmm0, xmm8
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+60h]
+	pcmpeqb xmm0, xmm9
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+70h]
+	pcmpeqb xmm0, xmm10
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+80h]
+	pcmpeqb xmm0, xmm11
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+90h]
+	pcmpeqb xmm0, xmm12
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+0A0h]
+	pcmpeqb xmm0, xmm13
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+0B0h]
+	pcmpeqb xmm0, xmm14
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	movdqu xmm0, xmmword ptr [rsp+0C0h]
+	pcmpeqb xmm0, xmm15
+	pmovmskb eax, xmm0
+	cmp  eax, 0FFFFh
+	jne  xmm_restore_done
+	mov  r10d, 1
+
+xmm_restore_done:
+	lea  rax, g_asm_xmm_restore_ok
+	mov  dword ptr [rax], r10d
+	lea  r10, g_asm_register_preservation_ok
+    mov  eax, dword ptr [r10]
     add  rsp, 0D8h
     pop  r15
     pop  r14

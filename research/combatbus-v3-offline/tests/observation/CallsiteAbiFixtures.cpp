@@ -20,6 +20,7 @@
 std::uint64_t __fastcall ObservationWrapper(std::uint32_t, void*, void*, void*, float*);
 extern "C" std::uint64_t g_asm_wrapper_return;
 extern "C" std::uint32_t g_asm_register_preservation_ok;
+extern "C" std::uint32_t g_asm_xmm_restore_ok;
 extern "C" std::uint32_t __fastcall AbiCallWithNonvolatileSentinels(std::uint32_t, void*, void*, void*, float*);
 extern "C" std::uint64_t (__fastcall *g_asm_wrapper_target)(std::uint32_t, void*, void*, void*, float*) = nullptr;
 
@@ -102,6 +103,7 @@ __declspec(noinline) std::uint64_t __fastcall ObservationWrapper(std::uint32_t e
 
 extern "C" std::uint64_t g_asm_wrapper_return = 0;
 extern "C" std::uint32_t g_asm_register_preservation_ok = 0;
+extern "C" std::uint32_t g_asm_xmm_restore_ok = 0;
 
 int main()
 {
@@ -168,10 +170,11 @@ int main()
 	value = 9.0F;
 	g_asm_wrapper_return = 0;
 	g_asm_register_preservation_ok = 0;
+	g_asm_xmm_restore_ok = 0;
 	Expect(RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(&AbiCallWithNonvolatileSentinels), &imageBase, nullptr) != nullptr,
 		"MASM caller exposes unwind metadata for its saved GPR and XMM state");
 	const auto preserved = AbiCallWithNonvolatileSentinels(0x24, second, third, fourth, &value);
-	Expect(preserved == 1 && g_asm_register_preservation_ok == 1,
+	Expect(preserved == 1 && g_asm_register_preservation_ok == 1 && g_asm_xmm_restore_ok == 1,
 		"MASM caller confirms RBX/RBP/RSI/RDI/R12-R15 and XMM6-XMM15 low 128 bits survive wrapper call");
 	Expect(g_asm_wrapper_return == 0xD00DFEEDCAFEBEEFULL,
 		"MASM caller confirms wrapper return value survives the ABI boundary");
