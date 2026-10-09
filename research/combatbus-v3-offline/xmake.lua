@@ -51,3 +51,18 @@ target("combatbus_startup_probe")
     set_kind("binary")
     add_files("tests/StartupProbe.cpp")
     add_includedirs("tests")
+
+target("observation_callsite_abi_fixtures")
+    set_kind("binary")
+    add_files("tests/observation/CallsiteAbiFixtures.cpp", "tests/observation/Win64NonvolatileProbe.asm")
+    add_includedirs("tests/observation")
+
+target("observation_callsite_rel32_fixtures")
+    set_kind("binary")
+    add_files("tests/observation/CallsiteRel32Fixtures.cpp")
+    add_includedirs("tests/observation")
+
+target("observation_mpsc_ring_fixtures")
+    set_kind("binary")
+    add_files("tests/observation/MpscRingFixtures.cpp")
+    add_includedirs("tests/observation")

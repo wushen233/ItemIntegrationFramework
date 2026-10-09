@@ -111,6 +111,20 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 	add_test(NAME combatbus_no_hook_structure
 		COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 			"${CMAKE_CURRENT_SOURCE_DIR}/tests/NoHookStructureCheck.ps1" "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+	add_test(NAME observation_callsite_abi
+		COMMAND "${COMBATBUS_TEST_BINARY_DIR}/Release/observation_callsite_abi_fixtures.exe"
+			"${CMAKE_CURRENT_SOURCE_DIR}/tests/observation/Win64NonvolatileProbe.asm")
+	add_test(NAME observation_callsite_rel32
+		COMMAND "${COMBATBUS_TEST_BINARY_DIR}/Release/observation_callsite_rel32_fixtures.exe")
+	add_test(NAME observation_mpsc_ring
+		COMMAND "${COMBATBUS_TEST_BINARY_DIR}/Release/observation_mpsc_ring_fixtures.exe")
+	add_test(NAME observation_legacy_isolation_contract
+		COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+			"${CMAKE_CURRENT_SOURCE_DIR}/tests/observation/VerifyLegacyIsolation.ps1"
+			"${CMAKE_CURRENT_SOURCE_DIR}/../.."
+			"${CMAKE_CURRENT_SOURCE_DIR}/tests/observation/ObservationBuildContract.json")
+	set_tests_properties(observation_callsite_abi observation_callsite_rel32 observation_mpsc_ring
+		observation_legacy_isolation_contract PROPERTIES TIMEOUT 30)
 else()
 	message(STATUS "Windows x64 cross-DLL ABI targets are not supported by this build host")
 endif()
